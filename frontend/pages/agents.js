@@ -250,7 +250,7 @@ export default function AgentsPage() {
       {showCreateModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-lg max-w-md w-full p-6">
-            <h2 className="text-xl font-semibold mb-4">Créer un nouveau companion IA</h2>
+            <h2 className="text-xl font-semibold mb-4">Créer un nouveau companion IA TEST</h2>
             
             <div className="space-y-4">
               <div>
