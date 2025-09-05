@@ -161,7 +161,7 @@ export default function AgentsPage() {
           <div className="flex justify-between items-center py-6">
             <div>
               <h1 className="text-3xl font-bold text-gray-900">TAIC Companion</h1>
-              <p className="mt-1 text-gray-500">Choisissez ou créez un agent spécialisé</p>
+              <p className="mt-1 text-gray-500">Choisissez ou créez un companion IA spécialisé</p>
             </div>
             <button
               onClick={logout}
@@ -184,7 +184,7 @@ export default function AgentsPage() {
             className="flex items-center px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
           >
             <Plus className="w-5 h-5 mr-2" />
-            Créer un nouvel agent
+            Créer un nouveau companion IA
           </button>
         </div>
 
@@ -192,13 +192,13 @@ export default function AgentsPage() {
         {agents.length === 0 ? (
           <div className="text-center py-12">
             <Bot className="w-16 h-16 mx-auto text-gray-400 mb-4" />
-            <h3 className="text-xl font-semibold text-gray-900 mb-2">Aucun agent créé</h3>
-            <p className="text-gray-500 mb-6">Créez votre premier agent pour commencer</p>
+            <h3 className="text-xl font-semibold text-gray-900 mb-2">Aucun companion IA créé</h3>
+            <p className="text-gray-500 mb-6">Créez votre premier companion IA pour commencer</p>
             <button
               onClick={() => setShowCreateModal(true)}
               className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
             >
-              Créer un agent
+              Créer un companion IA
             </button>
           </div>
         ) : (
@@ -229,14 +229,13 @@ export default function AgentsPage() {
                     </div>
                     
                     <h3 className="text-xl font-semibold text-gray-900 mb-2">{agent.name}</h3>
-                    <p className="text-sm text-gray-500 mb-1">Agent {typeConfig.name}</p>
+                    <p className="text-sm text-gray-500 mb-1">Companion IA {typeConfig.name}</p>
                     <p className="text-sm text-gray-400 mb-6">{typeConfig.description}</p>
-                    
                     <button
                       onClick={() => selectAgent(agent.id)}
                       className="w-full flex items-center justify-center px-4 py-2 bg-gray-50 text-gray-700 rounded-lg hover:bg-gray-100 transition-colors group-hover:bg-blue-50 group-hover:text-blue-700"
                     >
-                      Ouvrir l'agent
+                      Ouvrir le companion IA
                       <ArrowRight className="w-4 h-4 ml-2" />
                     </button>
                   </div>
@@ -251,25 +250,25 @@ export default function AgentsPage() {
       {showCreateModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-lg max-w-md w-full p-6">
-            <h2 className="text-xl font-semibold mb-4">Créer un nouvel agent</h2>
+            <h2 className="text-xl font-semibold mb-4">Créer un nouveau companion IA</h2>
             
             <div className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Nom de l'agent
+                  Nom du companion IA
                 </label>
                 <input
                   type="text"
                   value={newAgent.name}
                   onChange={(e) => setNewAgent({...newAgent, name: e.target.value})}
-                  placeholder="Ex: Agent Commercial"
+                  placeholder="Ex: Companion IA Commercial"
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 />
               </div>
               
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Type d'agent
+                  Type de companion IA
                 </label>
                 <select
                   value={newAgent.type}

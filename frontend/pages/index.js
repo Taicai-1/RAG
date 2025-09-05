@@ -1,4 +1,3 @@
-
 import { useState, useEffect } from "react";
 import { useRouter } from "next/router";
 import axios from "axios";
@@ -87,7 +86,7 @@ export default function Dashboard() {
       
       const agent = agentResponse.data.agents?.find(a => a.id.toString() === agentId.toString());
       if (!agent) {
-        toast.error("Agent non trouvé");
+        toast.error("Companion IA non trouvé");
         router.push("/agents");
         return;
       }
@@ -494,7 +493,7 @@ export default function Dashboard() {
                   {currentAgent.name} ({currentAgent.type})
                 </h1>
                 <p className={`text-sm capitalize ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-                  Agent {currentAgent.type}
+                  Companion IA {currentAgent.type}
                 </p>
               </div>
             </div>
