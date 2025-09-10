@@ -1,9 +1,11 @@
-from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Request
+
+from fastapi import Body, FastAPI, UploadFile, File, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
+import requests
 import logging
 import os
 import time
@@ -27,6 +29,38 @@ if os.getenv("GOOGLE_CLOUD_PROJECT"):
         pass
 
 app = FastAPI(title="TAIC Companion API", version="1.0.0")
+
+# Ajout d'un endpoint pour ajouter une URL comme source
+class UrlUploadRequest(BaseModel):
+    url: str
+    agent_id: int = None
+
+@app.post("/upload-url")
+async def upload_url(
+    request: UrlUploadRequest,
+    user_id: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Ajoute une URL comme document/source pour le RAG"""
+    try:
+        # Télécharger le contenu de l'URL
+        response = requests.get(request.url, timeout=15)
+        response.raise_for_status()
+        content = response.text
+        filename = request.url.split("//")[-1][:100].replace("/", "_") + ".txt"
+
+        # Indexer le document comme pour un upload classique
+        doc_id = process_document_for_user(filename, content.encode(), int(user_id), db, agent_id=request.agent_id)
+
+        logger.info(f"URL ajoutée pour user {user_id}, agent {request.agent_id}: {request.url}")
+        event_tracker.track_document_upload(int(user_id), request.url, len(content))
+
+        return {"url": request.url, "document_id": doc_id, "agent_id": request.agent_id, "status": "uploaded"}
+    except Exception as e:
+        logger.error(f"Erreur lors de l'ajout d'URL: {e}")
+        raise HTTPException(status_code=500, detail="Erreur lors de l'ajout de l'URL")
+    
+
 
 # CORS configuration
 app.add_middleware(

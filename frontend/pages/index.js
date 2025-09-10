@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/router";
 import axios from "axios";
 import toast, { Toaster } from "react-hot-toast";
-import { Upload, Send, LogOut, FileText, MessageCircle, Plus, Trash2, Check, ArrowLeft, Bot, Download, Moon, Sun, Loader2 } from "lucide-react";
+import { Upload, Send, LogOut, FileText, MessageCircle, Plus, Trash2, Check, ArrowLeft, Bot, Download, Moon, Sun, Loader2, Mic } from "lucide-react";
 
 // Auto-detect API URL based on environment
 const getApiUrl = () => {
@@ -33,6 +33,8 @@ export default function Dashboard() {
   // Suppression des états liés à l'export CSV/PDF/tableau
   const [darkMode, setDarkMode] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [urlToAdd, setUrlToAdd] = useState("");
   const router = useRouter();
 
   useEffect(() => {
@@ -284,6 +286,57 @@ export default function Dashboard() {
     router.push("/login");
   };
 
+  // Fonction pour démarrer la reconnaissance vocale
+  const startListening = () => {
+    if (!('webkitSpeechRecognition' in window)) {
+      toast.error("La reconnaissance vocale n'est pas supportée sur ce navigateur.");
+      return;
+    }
+    const recognition = new window.webkitSpeechRecognition();
+    recognition.lang = 'fr-FR';
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    setIsListening(true);
+    recognition.onresult = (event) => {
+      const transcript = event.results[0][0].transcript;
+      setQuestion(prev => prev ? prev + " " + transcript : transcript);
+      setIsTyping(true);
+    };
+    recognition.onerror = () => setIsListening(false);
+    recognition.onend = () => setIsListening(false);
+    recognition.start();
+  };
+
+  // Nouvelle fonction pour ajouter une URL comme document
+  const handleAddUrl = async () => {
+    if (!urlToAdd.trim()) return;
+    setLoading(true);
+    try {
+      // Envoi de la requête d'ajout d'URL
+      const response = await axios.post(
+        `${API_URL}/add-url`,
+        { url: urlToAdd },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+      
+      setUrlToAdd("");
+      showSuccessToast("URL ajoutée avec succès !");
+      
+      // Rechargement des documents
+      loadDocuments(token);
+    } catch (error) {
+      console.error("Error adding URL:", error);
+      showErrorToast("Erreur lors de l'ajout de l'URL");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div className={`min-h-screen flex transition-colors duration-300 ${
       darkMode ? 'bg-gray-900' : 'bg-gray-50'
@@ -510,10 +563,7 @@ export default function Dashboard() {
               <input
                 type="text"
                 value={question}
-                onChange={(e) => {
-                  setQuestion(e.target.value);
-                  setIsTyping(e.target.value.length > 0);
-                }}
+                onChange={handleQuestionChange}
                 onKeyPress={(e) => e.key === "Enter" && askQuestion()}
                 placeholder="Posez votre question..."
                 className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all ${
@@ -533,6 +583,16 @@ export default function Dashboard() {
                 </div>
               )}
             </div>
+            {/* Bouton micro à gauche du bouton Envoyer */}
+            <button
+              type="button"
+              onClick={startListening}
+              className={`p-3 rounded-lg bg-blue-100 hover:bg-blue-200 ${isListening ? "animate-pulse" : ""}`}
+              title="Entrée vocale"
+              disabled={isListening}
+            >
+              <Mic className="w-5 h-5 text-blue-600" />
+            </button>
             <button
               onClick={askQuestion}
               disabled={loading || !question.trim()}

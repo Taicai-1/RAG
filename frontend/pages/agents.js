@@ -11,8 +11,7 @@ import {
   Users,
   TrendingUp,
   UserCheck,
-  ShoppingCart,
-  Mic
+  ShoppingCart
 } from "lucide-react";
 
 // Auto-detect API URL based on environment
@@ -64,8 +63,6 @@ export default function AgentsPage() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newAgent, setNewAgent] = useState({ name: "", type: "sales" });
   const [token, setToken] = useState("");
-  const [prompt, setPrompt] = useState("");
-  const [isListening, setIsListening] = useState(false);
   const router = useRouter();
 
   useEffect(() => {
@@ -146,26 +143,6 @@ export default function AgentsPage() {
     router.push("/login");
   };
 
-  // Fonction pour démarrer la reconnaissance vocale
-  const startListening = () => {
-    if (!('webkitSpeechRecognition' in window)) {
-      toast.error("La reconnaissance vocale n'est pas supportée sur ce navigateur.");
-      return;
-    }
-    const recognition = new window.webkitSpeechRecognition();
-    recognition.lang = 'fr-FR';
-    recognition.interimResults = false;
-    recognition.maxAlternatives = 1;
-    setIsListening(true);
-    recognition.onresult = (event) => {
-      const transcript = event.results[0][0].transcript;
-      setPrompt(prev => prev ? prev + " " + transcript : transcript);
-    };
-    recognition.onerror = () => setIsListening(false);
-    recognition.onend = () => setIsListening(false);
-    recognition.start();
-  };
-
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -200,31 +177,6 @@ export default function AgentsPage() {
       {/* Main Content */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         
-        {/* Champ prompt vocal + bouton micro */}
-        <div className="max-w-2xl mx-auto mb-8">
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Prompt pour Companion IA
-          </label>
-          <div className="flex items-center space-x-2">
-            <input
-              type="text"
-              value={prompt}
-              onChange={e => setPrompt(e.target.value)}
-              placeholder="Écrivez ou dictez votre prompt..."
-              className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            />
-            <button
-              type="button"
-              onClick={startListening}
-              className={`p-2 rounded-full bg-blue-100 hover:bg-blue-200 ${isListening ? "animate-pulse" : ""}`}
-              title="Entrée vocale"
-              disabled={isListening}
-            >
-              <Mic className="w-5 h-5 text-blue-600" />
-            </button>
-          </div>
-        </div>
-
         {/* Create New Agent Button */}
         <div className="mb-8">
           <button
