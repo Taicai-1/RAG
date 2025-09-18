@@ -54,10 +54,14 @@ class Agent(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), nullable=False)
-    type = Column(String(50), nullable=False)  # 'sales', 'marketing', 'hr', 'purchase'
+    contexte = Column(Text, nullable=True)  # contexte pour ChatGPT
+    biographie = Column(Text, nullable=True)  # biographie visible côté users
+    profile_photo = Column(String(255), nullable=True)  # chemin ou URL de la photo de profil
+    email = Column(String(100), unique=True, nullable=False)  # email de connexion
+    password = Column(String(255), nullable=False)  # mot de passe hashé
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+
     # Relations
     owner = relationship("User", back_populates="agents")
     documents = relationship("Document", back_populates="agent", cascade="all, delete-orphan")

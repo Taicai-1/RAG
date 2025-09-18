@@ -253,7 +253,7 @@ export default function Dashboard() {
 
   const deleteDocument = async (docId) => {
     try {
-      await axios.delete(`${API_URL}/user/documents/${docId}`, {
+  await axios.delete(`${API_URL}/documents/${docId}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       setDocuments(prev => prev.filter(doc => doc.id !== docId));
@@ -451,6 +451,46 @@ export default function Dashboard() {
               {uploadLoading ? "Ajout en cours..." : "Ajouter"}
             </span>
           </label>
+
+          {/* Add URL Button */}
+          <div className="flex items-center mt-4 space-x-2">
+            <input
+              type="text"
+              className={`flex-1 px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all ${
+                darkMode ? 'border-gray-600 bg-gray-700 text-gray-100 placeholder-gray-400' : 'border-gray-300 bg-white text-gray-900 placeholder-gray-500'
+              }`}
+              placeholder="Ajouter une URL (https://...)"
+              value={urlToAdd}
+              onChange={e => setUrlToAdd(e.target.value)}
+              disabled={uploadLoading}
+            />
+            <button
+              type="button"
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors font-medium"
+              disabled={uploadLoading || !urlToAdd.trim()}
+              onClick={async () => {
+                if (!urlToAdd.trim()) return;
+                setUploadLoading(true);
+                try {
+                  const payload = { url: urlToAdd };
+                  if (currentAgent) payload.agent_id = currentAgent.id;
+                  await axios.post(`${API_URL}/upload-url`, payload, {
+                    headers: { Authorization: `Bearer ${token}` }
+                  });
+                  toast.success("URL ajoutée avec succès !");
+                  setUrlToAdd("");
+                  // Recharger les documents pour afficher la nouvelle source
+                  if (currentAgent) loadAgentData(currentAgent.id, token);
+                  else loadDocuments(token);
+                } catch (error) {
+                  console.error("Erreur lors de l'ajout de l'URL:", error);
+                  toast.error("Erreur lors de l'ajout de l'URL");
+                } finally {
+                  setUploadLoading(false);
+                }
+              }}
+            >Ajouter l'URL</button>
+          </div>
         </div>
         {/* Documents List */}
         <div className="flex-1 overflow-y-auto p-4">

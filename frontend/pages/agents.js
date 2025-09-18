@@ -61,7 +61,14 @@ export default function AgentsPage() {
   const [agents, setAgents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [newAgent, setNewAgent] = useState({ name: "", type: "sales" });
+  const [newAgent, setNewAgent] = useState({
+    name: "",
+    contexte: "",
+    biographie: "",
+    profile_photo: null, // file object
+    email: "",
+    password: ""
+  });
   const [token, setToken] = useState("");
   const router = useRouter();
 
@@ -96,20 +103,36 @@ export default function AgentsPage() {
     }
 
     try {
+      const formData = new FormData();
+      formData.append("name", newAgent.name);
+      formData.append("contexte", newAgent.contexte);
+      formData.append("biographie", newAgent.biographie);
+      if (newAgent.profile_photo) {
+        formData.append("profile_photo", newAgent.profile_photo);
+      }
+      formData.append("email", newAgent.email);
+      formData.append("password", newAgent.password);
+
       const response = await axios.post(
         `${API_URL}/agents`,
-        newAgent,
+        formData,
         {
           headers: { 
             Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json"
+            "Content-Type": "multipart/form-data"
           }
         }
       );
-      
       toast.success("Agent créé avec succès !");
       setShowCreateModal(false);
-      setNewAgent({ name: "", type: "sales" });
+      setNewAgent({
+        name: "",
+        contexte: "",
+        biographie: "",
+        profile_photo: null,
+        email: "",
+        password: ""
+      });
       loadAgents(token);
     } catch (error) {
       console.error("Error creating agent:", error);
@@ -268,19 +291,60 @@ export default function AgentsPage() {
               
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Type de companion IA
+                  Contexte (pour ChatGPT)
                 </label>
-                <select
-                  value={newAgent.type}
-                  onChange={(e) => setNewAgent({...newAgent, type: e.target.value})}
+                <textarea
+                  value={newAgent.contexte}
+                  onChange={(e) => setNewAgent({ ...newAgent, contexte: e.target.value })}
+                  placeholder="Ex: Ce companion doit répondre comme un expert RH..."
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                >
-                  {Object.entries(AGENT_TYPES).map(([type, config]) => (
-                    <option key={type} value={type}>
-                      {config.name} - {config.description}
-                    </option>
-                  ))}
-                </select>
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Biographie (affichée côté users)
+                </label>
+                <textarea
+                  value={newAgent.biographie}
+                  onChange={(e) => setNewAgent({ ...newAgent, biographie: e.target.value })}
+                  placeholder="Ex: Ce companion est spécialisé en..."
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Photo de profil
+                </label>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => setNewAgent({ ...newAgent, profile_photo: e.target.files[0] })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Email (connexion au companion)
+                </label>
+                <input
+                  type="email"
+                  value={newAgent.email}
+                  onChange={(e) => setNewAgent({ ...newAgent, email: e.target.value })}
+                  placeholder="exemple@email.com"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Mot de passe (connexion au companion)
+                </label>
+                <input
+                  type="password"
+                  value={newAgent.password}
+                  onChange={(e) => setNewAgent({ ...newAgent, password: e.target.value })}
+                  placeholder="Mot de passe sécurisé"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
               </div>
             </div>
             

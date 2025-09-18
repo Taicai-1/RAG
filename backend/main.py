@@ -146,15 +146,21 @@ class QuestionRequest(BaseModel):
 
 class AgentCreate(BaseModel):
     name: str
-    type: str  # 'sales', 'marketing', 'hr', 'purchase'
+    contexte: str = None
+    biographie: str = None
+    profile_photo: str = None  # URL or filename
+    email: str
+    password: str
 
 class AgentResponse(BaseModel):
     id: int
     name: str
-    type: str
+    contexte: str = None
+    biographie: str = None
+    profile_photo: str = None
+    email: str
     user_id: int
     created_at: datetime
-    
     class Config:
         from_attributes = True
 
@@ -256,7 +262,7 @@ async def upload_file(
             raise HTTPException(status_code=413, detail="File too large (max 10MB)")
         
         # Check file type
-        allowed_types = ['.pdf', '.txt', '.docx']
+        allowed_types = ['.pdf', '.txt', '.docx', '.ics']
         if not any(file.filename.lower().endswith(ext) for ext in allowed_types):
             raise HTTPException(status_code=400, detail="File type not supported")
         
@@ -287,9 +293,17 @@ async def upload_file_for_agent(
     try:
         # Get agent_id from form data
         form = await request.form()
+        logger.info(f"Form data received in /upload-agent: {dict(form)}")
         agent_id = form.get("agent_id")
+        # Fallback: extract agent_id from 'data' if present (Zapier edge case)
+        if not agent_id and "data" in form:
+            # Try to parse agent_id from string like 'agent_id=23'
+            data_value = form.get("data")
+            if isinstance(data_value, str) and data_value.startswith("agent_id="):
+                agent_id = data_value.split("=", 1)[1]
         
         if not agent_id:
+            logger.error(f"agent_id missing in form: {dict(form)}")
             raise HTTPException(status_code=400, detail="agent_id is required")
         
         agent_id = int(agent_id)
@@ -298,7 +312,7 @@ async def upload_file_for_agent(
             raise HTTPException(status_code=413, detail="File too large (max 10MB)")
         
         # Check file type
-        allowed_types = ['.pdf', '.txt', '.docx']
+        allowed_types = ['.pdf', '.txt', '.docx', '.ics']
         if not any(file.filename.lower().endswith(ext) for ext in allowed_types):
             raise HTTPException(status_code=400, detail="File type not supported")
         
@@ -556,19 +570,24 @@ async def create_agent(
 ):
     """Create a new agent"""
     try:
-        valid_types = ['sales', 'marketing', 'hr', 'purchase']
-        if agent.type not in valid_types:
-            raise HTTPException(status_code=400, detail=f"Invalid agent type. Must be one of: {valid_types}")
-        
+        # Check if email already exists for another agent
+        if db.query(Agent).filter(Agent.email == agent.email).first():
+            raise HTTPException(status_code=400, detail="Email already registered for another agent")
+        # Hash password
+        from auth import hash_password
+        hashed_password = hash_password(agent.password)
         db_agent = Agent(
             name=agent.name,
-            type=agent.type,
+            contexte=agent.contexte,
+            biographie=agent.biographie,
+            profile_photo=agent.profile_photo,
+            email=agent.email,
+            password=hashed_password,
             user_id=int(user_id)
         )
         db.add(db_agent)
         db.commit()
         db.refresh(db_agent)
-        
         return {"agent": db_agent}
     except HTTPException:
         raise
