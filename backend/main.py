@@ -19,6 +19,9 @@ from rag_engine import get_answer, get_answer_with_files, process_document_for_u
 from file_generator import FileGenerator
 from utils import logger, event_tracker
 
+from fastapi import Form
+import shutil
+
 # Setup Google Cloud Logging
 if os.getenv("GOOGLE_CLOUD_PROJECT"):
     try:
@@ -30,10 +33,18 @@ if os.getenv("GOOGLE_CLOUD_PROJECT"):
 
 app = FastAPI(title="TAIC Companion API", version="1.0.0")
 
+
 # Ajout d'un endpoint pour ajouter une URL comme source
 class UrlUploadRequest(BaseModel):
     url: str
     agent_id: int = None
+
+# Expose le dossier profile_photos en statique après la création de l'app
+from fastapi.staticfiles import StaticFiles
+import os
+if not os.path.exists("profile_photos"):
+    os.makedirs("profile_photos")
+app.mount("/profile_photos", StaticFiles(directory="profile_photos"), name="profile_photos")
 
 @app.post("/upload-url")
 async def upload_url(
@@ -142,7 +153,7 @@ class UserLogin(BaseModel):
 class QuestionRequest(BaseModel):
     question: str
     selected_documents: list[int] = []  # List of document IDs to use
-    agent_type: str = None  # Optional agent type for specialized prompts
+    agent_id: int = None  # Id de l'agent sélectionné
 
 class AgentCreate(BaseModel):
     name: str
@@ -233,11 +244,11 @@ async def ask_question(
         
         # Get only the answer (plus simple)
         answer = get_answer(
-            request.question, 
-            int(user_id), 
-            db, 
+            request.question,
+            int(user_id),
+            db,
             selected_doc_ids=request.selected_documents,
-            agent_type=request.agent_type
+            agent_id=request.agent_id
         )
         
         response_time = time.time() - start_time
@@ -562,38 +573,73 @@ async def get_agents(
         logger.error(f"Error getting agents: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
+
 @app.post("/agents")
 async def create_agent(
-    agent: AgentCreate,
+    name: str = Form(...),
+    contexte: str = Form(None),
+    biographie: str = Form(None),
+    email: str = Form(...),
+    password: str = Form(...),
+    profile_photo: UploadFile = File(None),
     user_id: str = Depends(verify_token),
     db: Session = Depends(get_db)
 ):
-    """Create a new agent"""
+    """Create a new agent with optional profile photo upload"""
     try:
+        logger.info(f"[CREATE_AGENT] Champs reçus: name={name}, contexte={contexte}, biographie={biographie}, email={email}, password={'***' if password else None}, profile_photo={profile_photo.filename if profile_photo else None}, user_id={user_id}")
         # Check if email already exists for another agent
-        if db.query(Agent).filter(Agent.email == agent.email).first():
+        if db.query(Agent).filter(Agent.email == email).first():
+            logger.warning(f"[CREATE_AGENT] Email déjà utilisé: {email}")
             raise HTTPException(status_code=400, detail="Email already registered for another agent")
         # Hash password
         from auth import hash_password
-        hashed_password = hash_password(agent.password)
+        hashed_password = hash_password(password)
+
+        # Handle profile photo upload
+        photo_path = None
+        if profile_photo is not None:
+            try:
+                upload_dir = "profile_photos"
+                os.makedirs(upload_dir, exist_ok=True)
+                file_ext = os.path.splitext(profile_photo.filename)[1]
+                safe_filename = f"{int(time.time())}_{profile_photo.filename.replace(' ', '_')}"
+                photo_path = os.path.join(upload_dir, safe_filename)
+                with open(photo_path, "wb") as buffer:
+                    shutil.copyfileobj(profile_photo.file, buffer)
+                logger.info(f"[CREATE_AGENT] Photo de profil sauvegardée: {photo_path}")
+            except Exception as file_err:
+                logger.error(f"[CREATE_AGENT] Erreur lors de la sauvegarde de la photo: {file_err}")
+                raise HTTPException(status_code=500, detail=f"Erreur lors de la sauvegarde de la photo: {file_err}")
+
         db_agent = Agent(
-            name=agent.name,
-            contexte=agent.contexte,
-            biographie=agent.biographie,
-            profile_photo=agent.profile_photo,
-            email=agent.email,
+            name=name,
+            contexte=contexte,
+            biographie=biographie,
+            profile_photo=photo_path,
+            email=email,
             password=hashed_password,
             user_id=int(user_id)
         )
+        # Debug: afficher les colonnes de la table agents
+        try:
+            import sqlalchemy
+            insp = sqlalchemy.inspect(db.get_bind())
+            columns = insp.get_columns('agents')
+            logger.info(f"[CREATE_AGENT] Colonnes actuelles de la table agents: {[col['name'] for col in columns]}")
+        except Exception as debug_err:
+            logger.error(f"[CREATE_AGENT] Erreur lors de l'inspection des colonnes: {debug_err}")
         db.add(db_agent)
         db.commit()
         db.refresh(db_agent)
+        logger.info(f"[CREATE_AGENT] Agent créé avec succès: id={db_agent.id}, email={db_agent.email}")
         return {"agent": db_agent}
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error creating agent: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logger.error(f"[CREATE_AGENT] Erreur inattendue: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la création de l'agent: {e}")
 
 @app.delete("/agents/{agent_id}")
 async def delete_agent(

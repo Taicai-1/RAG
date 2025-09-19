@@ -1,7 +1,10 @@
 {
-  "/": "pages/index.js",
   "/_app": "pages/_app.js",
-  "/login": "pages/login.js",
+  "/agents": "pages/agents.js",
   "/_error": "pages/_error.js",
+  "/api/ask": "pages/api/ask.js",
+  "/chat/[agentId]": "pages/chat/[agentId].js",
+  "/": "pages/index.js",
+  "/login": "pages/login.js",
   "/_document": "pages/_document.js"
 }

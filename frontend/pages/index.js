@@ -180,7 +180,7 @@ export default function Dashboard() {
         { 
           question,
           selected_documents: Array.from(selectedDocuments),
-          agent_type: currentAgent?.type || 'sales'
+          agent_id: currentAgent?.id || agentId // on envoie l'id de l'agent sélectionné
         },
         {
           headers: {
@@ -189,10 +189,7 @@ export default function Dashboard() {
           },
         }
       );
-      
       setAnswer(response.data.answer);
-      // Suppression de la gestion des capacités d'export
-      
       showSuccessToast("Réponse générée avec succès !");
     } catch (error) {
       console.error("Error:", error);
@@ -354,6 +351,18 @@ export default function Dashboard() {
       <div className={`w-80 shadow-lg border-r flex flex-col transition-colors duration-300 ${
         darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'
       }`}>
+        {/* Bouton Users pour voir la fiche agent */}
+        {currentAgent && (
+          <div className="p-4 border-b border-blue-100 bg-blue-50 flex items-center justify-start">
+            <button
+              onClick={() => router.push(`/chat/${currentAgent.id}`)}
+              className="text-white bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg font-semibold shadow"
+              style={{ minWidth: 90 }}
+            >
+              Users
+            </button>
+          </div>
+        )}
         {/* Header */}
         <div className={`p-6 border-b transition-colors duration-300 ${
           darkMode ? 'border-gray-700' : 'border-gray-200'

@@ -19,17 +19,14 @@ const getApiUrl = () => {
   if (process.env.NEXT_PUBLIC_API_URL) {
     return process.env.NEXT_PUBLIC_API_URL;
   }
-  // If in production (Cloud Run), try to detect backend URL
   if (typeof window !== "undefined" && window.location.hostname.includes("run.app")) {
     return window.location.origin.replace("frontend", "backend");
   }
-  // Fallback to localhost
   return "http://localhost:8080";
 };
 
 const API_URL = getApiUrl();
 
-// Agent type configuration
 const AGENT_TYPES = {
   sales: {
     name: "Sales",
@@ -60,16 +57,10 @@ const AGENT_TYPES = {
 export default function AgentsPage() {
   const [agents, setAgents] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [showCreateModal, setShowCreateModal] = useState(false);
-  const [newAgent, setNewAgent] = useState({
-    name: "",
-    contexte: "",
-    biographie: "",
-    profile_photo: null, // file object
-    email: "",
-    password: ""
-  });
   const [token, setToken] = useState("");
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ name: "", contexte: "", biographie: "", profile_photo: null, email: "", password: "" });
+  const [creating, setCreating] = useState(false);
   const router = useRouter();
 
   useEffect(() => {
@@ -80,6 +71,7 @@ export default function AgentsPage() {
       setToken(savedToken);
       loadAgents(savedToken);
     }
+    // eslint-disable-next-line
   }, [router]);
 
   const loadAgents = async (authToken) => {
@@ -96,55 +88,10 @@ export default function AgentsPage() {
     }
   };
 
-  const createAgent = async () => {
-    if (!newAgent.name.trim()) {
-      toast.error("Veuillez saisir un nom pour l'agent");
-      return;
-    }
-
-    try {
-      const formData = new FormData();
-      formData.append("name", newAgent.name);
-      formData.append("contexte", newAgent.contexte);
-      formData.append("biographie", newAgent.biographie);
-      if (newAgent.profile_photo) {
-        formData.append("profile_photo", newAgent.profile_photo);
-      }
-      formData.append("email", newAgent.email);
-      formData.append("password", newAgent.password);
-
-      const response = await axios.post(
-        `${API_URL}/agents`,
-        formData,
-        {
-          headers: { 
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "multipart/form-data"
-          }
-        }
-      );
-      toast.success("Agent créé avec succès !");
-      setShowCreateModal(false);
-      setNewAgent({
-        name: "",
-        contexte: "",
-        biographie: "",
-        profile_photo: null,
-        email: "",
-        password: ""
-      });
-      loadAgents(token);
-    } catch (error) {
-      console.error("Error creating agent:", error);
-      toast.error("Erreur lors de la création de l'agent");
-    }
-  };
-
   const deleteAgent = async (agentId) => {
     if (!confirm("Êtes-vous sûr de vouloir supprimer cet agent ?")) {
       return;
     }
-
     try {
       await axios.delete(`${API_URL}/agents/${agentId}`, {
         headers: { Authorization: `Bearer ${token}` }
@@ -155,10 +102,6 @@ export default function AgentsPage() {
       console.error("Error deleting agent:", error);
       toast.error("Erreur lors de la suppression");
     }
-  };
-
-  const selectAgent = (agentId) => {
-    router.push(`/?agentId=${agentId}`);
   };
 
   const logout = () => {
@@ -177,7 +120,6 @@ export default function AgentsPage() {
   return (
     <div className="min-h-screen bg-gray-50">
       <Toaster position="top-right" />
-      
       {/* Header */}
       <div className="bg-white shadow-sm border-b">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -197,174 +139,150 @@ export default function AgentsPage() {
         </div>
       </div>
 
-      {/* Main Content */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        
-        {/* Create New Agent Button */}
-        <div className="mb-8">
-          <button
-            onClick={() => setShowCreateModal(true)}
-            className="flex items-center px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
-          >
-            <Plus className="w-5 h-5 mr-2" />
-            Créer un nouveau companion IA
-          </button>
-        </div>
-
-        {/* Agents Grid */}
-        {agents.length === 0 ? (
-          <div className="text-center py-12">
-            <Bot className="w-16 h-16 mx-auto text-gray-400 mb-4" />
-            <h3 className="text-xl font-semibold text-gray-900 mb-2">Aucun companion IA créé</h3>
-            <p className="text-gray-500 mb-6">Créez votre premier companion IA pour commencer</p>
-            <button
-              onClick={() => setShowCreateModal(true)}
-              className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-            >
-              Créer un companion IA
-            </button>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {agents.map((agent) => {
-              const typeConfig = AGENT_TYPES[agent.type] || AGENT_TYPES.sales;
-              const IconComponent = typeConfig.icon;
-              
-              return (
-                <div
-                  key={agent.id}
-                  className="bg-white rounded-lg shadow-sm border border-gray-200 hover:shadow-md transition-shadow cursor-pointer group"
-                >
-                  <div className="p-6">
-                    <div className="flex items-start justify-between mb-4">
-                      <div className={`p-3 rounded-lg ${typeConfig.color}`}>
-                        <IconComponent className="w-6 h-6 text-white" />
-                      </div>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          deleteAgent(agent.id);
-                        }}
-                        className="p-2 text-gray-400 hover:text-red-600 transition-colors opacity-0 group-hover:opacity-100"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                    
-                    <h3 className="text-xl font-semibold text-gray-900 mb-2">{agent.name}</h3>
-                    <p className="text-sm text-gray-500 mb-1">Companion IA {typeConfig.name}</p>
-                    <p className="text-sm text-gray-400 mb-6">{typeConfig.description}</p>
-                    <button
-                      onClick={() => selectAgent(agent.id)}
-                      className="w-full flex items-center justify-center px-4 py-2 bg-gray-50 text-gray-700 rounded-lg hover:bg-gray-100 transition-colors group-hover:bg-blue-50 group-hover:text-blue-700"
-                    >
-                      Ouvrir le companion IA
-                      <ArrowRight className="w-4 h-4 ml-2" />
-                    </button>
+      {/* Create New Agent Button */}
+      <div className="mb-8">
+        <button
+          onClick={() => setShowForm(true)}
+          className="flex items-center px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
+        >
+          <Plus className="w-5 h-5 mr-2" />
+          Créer un nouveau companion IA
+        </button>
+        {showForm && (
+          <div className="mt-6 bg-white rounded-lg shadow-lg p-6 max-w-md mx-auto">
+            <h2 className="text-xl font-semibold mb-4">Créer un nouveau companion IA</h2>
+            <div className="space-y-4">
+              <input type="text" className="w-full px-3 py-2 border rounded-lg" placeholder="Nom" value={form.name} onChange={e => setForm(f => ({...f, name: e.target.value}))} />
+              <textarea className="w-full px-3 py-2 border rounded-lg" placeholder="Contexte" value={form.contexte} onChange={e => setForm(f => ({...f, contexte: e.target.value}))} />
+              <textarea className="w-full px-3 py-2 border rounded-lg" placeholder="Biographie" value={form.biographie} onChange={e => setForm(f => ({...f, biographie: e.target.value}))} />
+              <div className="flex flex-col items-center space-y-2">
+                {form.profile_photo ? (
+                  <img
+                    src={URL.createObjectURL(form.profile_photo)}
+                    alt="Aperçu"
+                    className="w-24 h-24 object-cover rounded-full border-2 border-blue-400 shadow mb-2"
+                  />
+                ) : (
+                  <div className="w-24 h-24 rounded-full border-2 border-dashed border-blue-300 flex items-center justify-center text-blue-300 mb-2">
+                    <span className="text-3xl">+</span>
                   </div>
-                </div>
-              );
-            })}
+                )}
+                <label className="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium cursor-pointer hover:bg-blue-700 transition-colors">
+                  {form.profile_photo ? 'Changer la photo' : 'Choisir une photo'}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={e => {
+                      if (e.target.files && e.target.files[0]) {
+                        setForm(f => ({...f, profile_photo: e.target.files[0]}));
+                      }
+                    }}
+                  />
+                </label>
+              </div>
+              <input type="email" className="w-full px-3 py-2 border rounded-lg" placeholder="Email" value={form.email} onChange={e => setForm(f => ({...f, email: e.target.value}))} />
+              <input type="password" className="w-full px-3 py-2 border rounded-lg" placeholder="Mot de passe" value={form.password} onChange={e => setForm(f => ({...f, password: e.target.value}))} />
+            </div>
+            <div className="flex space-x-3 mt-6">
+              <button onClick={() => setShowForm(false)} className="flex-1 px-4 py-2 text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200">Annuler</button>
+              <button
+                onClick={async () => {
+                  if (!form.name.trim() || !form.email.trim() || !form.password.trim()) {
+                    toast.error("Nom, email et mot de passe obligatoires");
+                    return;
+                  }
+                  setCreating(true);
+                  try {
+                    const formData = new FormData();
+                    formData.append("name", form.name);
+                    formData.append("contexte", form.contexte);
+                    formData.append("biographie", form.biographie);
+                    if (form.profile_photo) formData.append("profile_photo", form.profile_photo);
+                    formData.append("email", form.email);
+                    formData.append("password", form.password);
+                    await axios.post(`${API_URL}/agents`, formData, {
+                      headers: { Authorization: `Bearer ${token}`, "Content-Type": "multipart/form-data" }
+                    });
+                    toast.success("Agent créé avec succès !");
+                    setShowForm(false);
+                    setForm({ name: "", contexte: "", biographie: "", profile_photo: null, email: "", password: "" });
+                    loadAgents(token);
+                  } catch (err) {
+                    toast.error("Erreur lors de la création");
+                  } finally {
+                    setCreating(false);
+                  }
+                }}
+                className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                disabled={creating}
+              >
+                {creating ? "Création..." : "Créer"}
+              </button>
+            </div>
           </div>
         )}
       </div>
 
-      {/* Create Agent Modal */}
-      {showCreateModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-lg max-w-md w-full p-6">
-            <h2 className="text-xl font-semibold mb-4">Créer un nouveau companion IA TEST</h2>
-            
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Nom du companion IA
-                </label>
-                <input
-                  type="text"
-                  value={newAgent.name}
-                  onChange={(e) => setNewAgent({...newAgent, name: e.target.value})}
-                  placeholder="Ex: Companion IA Commercial"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-              </div>
-              
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Contexte (pour ChatGPT)
-                </label>
-                <textarea
-                  value={newAgent.contexte}
-                  onChange={(e) => setNewAgent({ ...newAgent, contexte: e.target.value })}
-                  placeholder="Ex: Ce companion doit répondre comme un expert RH..."
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Biographie (affichée côté users)
-                </label>
-                <textarea
-                  value={newAgent.biographie}
-                  onChange={(e) => setNewAgent({ ...newAgent, biographie: e.target.value })}
-                  placeholder="Ex: Ce companion est spécialisé en..."
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Photo de profil
-                </label>
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={(e) => setNewAgent({ ...newAgent, profile_photo: e.target.files[0] })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Email (connexion au companion)
-                </label>
-                <input
-                  type="email"
-                  value={newAgent.email}
-                  onChange={(e) => setNewAgent({ ...newAgent, email: e.target.value })}
-                  placeholder="exemple@email.com"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Mot de passe (connexion au companion)
-                </label>
-                <input
-                  type="password"
-                  value={newAgent.password}
-                  onChange={(e) => setNewAgent({ ...newAgent, password: e.target.value })}
-                  placeholder="Mot de passe sécurisé"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-              </div>
-            </div>
-            
-            <div className="flex space-x-3 mt-6">
-              <button
-                onClick={() => setShowCreateModal(false)}
-                className="flex-1 px-4 py-2 text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+      {/* Agents Grid */}
+      {agents.length === 0 ? (
+        <div className="text-center py-12">
+          <Bot className="w-16 h-16 mx-auto text-gray-400 mb-4" />
+          <h3 className="text-xl font-semibold text-gray-900 mb-2">Aucun companion IA créé</h3>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {agents.map((agent) => {
+            const typeConfig = AGENT_TYPES[agent.type] || AGENT_TYPES.sales;
+            const IconComponent = typeConfig.icon;
+            return (
+              <div
+                key={agent.id}
+                className="bg-white rounded-lg shadow-sm border border-gray-200 hover:shadow-md transition-shadow cursor-pointer group"
+                onClick={() => router.push(`/?agentId=${agent.id}`)}
               >
-                Annuler
-              </button>
-              <button
-                onClick={createAgent}
-                className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-              >
-                Créer
-              </button>
-            </div>
-          </div>
+                <div className="p-6">
+                  <div className="flex items-start justify-between mb-4">
+                    {agent.profile_photo ? (
+                      <img
+                        src={agent.profile_photo.startsWith('http') ? agent.profile_photo : `${API_URL}/profile_photos/${agent.profile_photo.replace(/^.*[\\/]/, '')}`}
+                        alt={agent.name}
+                        className="w-12 h-12 object-cover rounded-full border-2 border-blue-400 shadow"
+                        onError={e => { e.target.onerror = null; e.target.src = '/default-avatar.png'; }}
+                      />
+                    ) : (
+                      <div className={`p-3 rounded-lg ${typeConfig.color}`}>
+                        <IconComponent className="w-6 h-6 text-white" />
+                      </div>
+                    )}
+                    <button
+                      onClick={e => {
+                        e.stopPropagation();
+                        deleteAgent(agent.id);
+                      }}
+                      className="p-2 text-gray-400 hover:text-red-600 transition-colors opacity-0 group-hover:opacity-100"
+                      title="Supprimer"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <h3 className="text-xl font-semibold text-gray-900 mb-2">{agent.name}</h3>
+                  <button
+                    onClick={e => {
+                      e.stopPropagation();
+                      router.push(`/?agentId=${agent.id}`);
+                    }}
+                    className="mt-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-semibold shadow"
+                  >
+                    Ouvrir l'agent
+                  </button>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
   );
 }
+

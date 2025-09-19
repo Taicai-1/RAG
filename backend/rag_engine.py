@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Tuple
 from sqlalchemy.orm import Session
 from openai_client import get_embedding, get_chat_response, get_embedding_fast
-from database import Document, DocumentChunk, User
+from database import Document, DocumentChunk, User, Agent
 from file_loader import load_text_from_pdf, chunk_text
 from file_generator import FileGenerator
 
@@ -68,47 +68,29 @@ def get_answer_with_files(question: str, user_id: int, db: Session, selected_doc
         logger.error(f"Error getting answer with files: {e}")
         raise Exception(f"Erreur lors du traitement de votre question : {str(e)}")
 
-def get_agent_system_prompt(agent_type: str = None) -> str:
-    """Get system prompt based on agent type"""
-    agent_prompts = {
-        'sales': """Vous êtes un assistant IA spécialisé en VENTES. Votre rôle est d'analyser les documents du point de vue commercial et d'aider avec les stratégies de vente, la prospection, et la conversion client.""",
-        'marketing': """Vous êtes un assistant IA spécialisé en MARKETING. Votre rôle est d'analyser les documents du point de vue marketing et d'aider avec les campagnes, la communication, et la stratégie de marque.""",
-        'hr': """Vous êtes un assistant IA spécialisé en RESSOURCES HUMAINES. Votre rôle est d'analyser les documents du point de vue RH et d'aider avec le recrutement, la gestion des talents, et les politiques d'entreprise.""",
-        'purchase': """Vous êtes un assistant IA spécialisé en ACHATS. Votre rôle est d'analyser les documents du point de vue achats et d'aider avec la négociation fournisseurs, l'approvisionnement, et l'optimisation des coûts."""
-    }
-    
-    if agent_type and agent_type in agent_prompts:
-        return agent_prompts[agent_type]
-    else:
-        return "Vous êtes un assistant IA professionnel."
 
-def get_direct_gpt_response(question: str, agent_type: str = None) -> str:
-    """Get direct response from GPT without RAG when no documents are available"""
+def get_direct_gpt_response(question: str, db: Session, agent_id: int = None) -> str:
+    """Get direct response from GPT without RAG when no documents are available, using agent_id for context"""
     try:
-        # Get agent-specific system prompt
-        agent_prompt = get_agent_system_prompt(agent_type)
-        
-        # Create prompt for direct GPT call
-        prompt = f"""{agent_prompt}
-
-L'utilisateur n'a pas encore uploadé de documents. Répondez à sa question en utilisant vos connaissances générales, tout en gardant votre spécialisation à l'esprit.
-
-Question: {question}
-
-Réponse:"""
-        
-        # Get AI response
-        logger.info("Getting direct response from OpenAI (no documents)")
+        from database import Agent
+        agent = None
+        contexte_agent = ""
+        if agent_id:
+            agent = db.query(Agent).filter(Agent.id == agent_id).first()
+        if not agent:
+            contexte_agent = ""
+        else:
+            contexte_agent = agent.contexte or ""
+        prompt = f"{contexte_agent}\n\nQuestion : {question}\n\nRéponse :"
+        logger.info("Getting direct response from OpenAI (contexte personnalisé, pas de documents, agent_id)")
         response = get_chat_response(prompt)
         logger.info("Successfully got direct response from OpenAI")
-        
         return response
-        
     except Exception as e:
         logger.error(f"Error getting direct GPT response: {e}")
         raise Exception(f"Erreur lors du traitement de votre question : {str(e)}")
 
-def get_answer(question: str, user_id: int, db: Session, selected_doc_ids: List[int] = None, agent_type: str = None) -> str:
+def get_answer(question: str, user_id: int, db: Session, selected_doc_ids: List[int] = None, agent_id: int = None) -> str:
     """Get answer using RAG for specific user with OpenAI - always using embeddings"""
     try:
         # Get user's documents (filter by selected documents if provided)
@@ -126,9 +108,9 @@ def get_answer(question: str, user_id: int, db: Session, selected_doc_ids: List[
             if selected_doc_ids:
                 return "Aucun des documents sélectionnés n'a été trouvé. Veuillez vérifier votre sélection."
             else:
-                # No documents available - use direct GPT call
-                logger.info("No documents found, using direct GPT call")
-                return get_direct_gpt_response(question, agent_type)
+                # No documents available - use direct GPT call with agent_id
+                logger.info("No documents found, using direct GPT call with agent_id")
+                return get_direct_gpt_response(question, db, agent_id)
         
         # Always get question embedding with retry
         logger.info(f"Getting embedding for question: {question}")
@@ -146,73 +128,79 @@ def get_answer(question: str, user_id: int, db: Session, selected_doc_ids: List[
         documents_info = get_documents_summary(user_id, db, selected_doc_ids)
         
         # Prepare context with document attribution
-        context_by_document = {}
-        for result in context_results:
-            doc_name = result['document_name']
-            if doc_name not in context_by_document:
-                context_by_document[doc_name] = []
-            context_by_document[doc_name].append(result['text'])
-        
-        # Build enhanced context string
-        enhanced_context = ""
-        for doc_name, contexts in context_by_document.items():
-            enhanced_context += f"\n--- Extraits du document '{doc_name}' ---\n"
-            for i, context in enumerate(contexts, 1):
-                enhanced_context += f"Extrait {i}: {context}\n"
-        
-        # Check if user is asking for a summary of multiple documents
-        is_summary_request = any(word in question.lower() for word in ['résumé', 'résume', 'synthèse', 'présente', 'parle de quoi', 'contenu'])
-        is_multiple_docs = len(documents_info) > 1
-        
-        if is_summary_request and is_multiple_docs:
-            # Special handling for document summaries
-            documents_content = ""
-            for i, doc in enumerate(documents_info, 1):
-                documents_content += f"\n=== Document {i}: {doc['filename']} ===\n"
-                documents_content += f"Contenu: {doc['content']}\n"
-            
-            prompt = f"""Vous êtes un assistant IA spécialisé dans l'analyse de documents. L'utilisateur vous demande de faire un résumé de {len(documents_info)} documents.
+        try:
+            # Récupérer le contexte personnalisé de l'agent par son id
+            agent = None
+            contexte_agent = ""
+            if agent_id:
+                agent = db.query(Agent).filter(Agent.id == agent_id).first()
+            if not agent:
+                agent = db.query(Agent).filter(Agent.user_id == user_id).first()
+            contexte_agent = agent.contexte if agent and agent.contexte else ""
 
-DOCUMENTS À ANALYSER:
-{documents_content}
+            # Get user's documents (filter by selected documents if provided)
+            if selected_doc_ids:
+                user_docs = db.query(Document).filter(
+                    Document.user_id == user_id,
+                    Document.id.in_(selected_doc_ids)
+                ).all()
+                logger.info(f"Using {len(user_docs)} selected documents: {selected_doc_ids}")
+            else:
+                user_docs = db.query(Document).filter(Document.user_id == user_id).all()
+                logger.info(f"Using all {len(user_docs)} user documents")
 
-CONSIGNES:
-- Créez {len(documents_info)} paragraphes distincts, un pour chaque document
-- Commencez chaque paragraphe par "Document [X] - [nom du fichier]:"
-- Faites un résumé concis mais informatif de chaque document
-- Gardez l'ordre des documents tel que présenté
-- Utilisez un style professionnel et structuré
+            if not user_docs:
+                if selected_doc_ids:
+                    return "Aucun des documents sélectionnés n'a été trouvé. Veuillez vérifier votre sélection."
+                else:
+                    # No documents available - utilise le contexte + question seulement
+                    logger.info("No documents found, using context + question only")
+                    prompt = f"{contexte_agent}\n\nQuestion : {question}\n\nRéponse :"
+                    response = get_chat_response(prompt)
+                    return response
 
-Question de l'utilisateur: {question}
+            # Always get question embedding with retry
+            logger.info(f"Getting embedding for question: {question}")
+            query_embedding = get_embedding(question)
+            logger.info("Successfully got query embedding")
 
-Réponse:"""
-        else:
-            # Get agent-specific system prompt
-            agent_prompt = get_agent_system_prompt(agent_type)
-            
-            # Standard RAG response with document attribution
-            prompt = f"""{agent_prompt} Utilisez les extraits de documents ci-dessous pour répondre à la question de l'utilisateur.
+            # Search similar chunks for this user (with optional document filtering)
+            logger.info(f"Searching similar texts for user {user_id}")
+            context_results = search_similar_texts_for_user(query_embedding, user_id, db, top_k=8, selected_doc_ids=selected_doc_ids)
 
-CONTEXTE DES DOCUMENTS ({len(documents_info)} document(s) sélectionné(s)):
-{enhanced_context}
+            if not context_results:
+                # Pas d'extraits pertinents, prompt = contexte + question
+                prompt = f"{contexte_agent}\n\nQuestion : {question}\n\nRéponse :"
+                response = get_chat_response(prompt)
+                return response
 
-CONSIGNES:
-- Basez votre réponse uniquement sur les informations fournies dans les extraits
-- Mentionnez de quel(s) document(s) proviennent les informations (ex: "Selon le document 'nom_fichier'...")
-- Si la réponse nécessite des informations de plusieurs documents, organisez votre réponse clairement
-- Si vous ne trouvez pas d'information pertinente, dites-le clairement
-- Soyez précis et professionnel
+            # Get complete document information
+            documents_info = get_documents_summary(user_id, db, selected_doc_ids)
 
-Question: {question}
+            # Préparer le contexte RAG
+            context_by_document = {}
+            for result in context_results:
+                doc_name = result['document_name']
+                if doc_name not in context_by_document:
+                    context_by_document[doc_name] = []
+                context_by_document[doc_name].append(result['text'])
 
-Réponse:"""
-        
-        # Always get AI response with retry
-        logger.info("Getting response from OpenAI")
-        response = get_chat_response(prompt)
-        logger.info("Successfully got response from OpenAI")
-        
-        return response
+            # Build enhanced context string
+            enhanced_context = ""
+            for doc_name, contexts in context_by_document.items():
+                enhanced_context += f"\n--- Extraits du document '{doc_name}' ---\n"
+                for i, context in enumerate(contexts, 1):
+                    enhanced_context += f"Extrait {i}: {context}\n"
+
+            # Prompt final : contexte + question + extraits RAG
+            prompt = f"{contexte_agent}\n\nQuestion : {question}\n\nExtraits de documents :\n{enhanced_context}\n\nRéponse :"
+            logger.info("Getting response from OpenAI with custom prompt order (contexte, question, RAG)")
+            response = get_chat_response(prompt)
+            logger.info("Successfully got response from OpenAI")
+            return response
+        except Exception as e:
+            logger.error(f"Error getting answer: {e}")
+            raise Exception(f"Erreur lors du traitement de votre question avec l'API OpenAI : {str(e)}")
     
     except Exception as e:
         logger.error(f"Error getting answer: {e}")
