@@ -1,3 +1,4 @@
+from google.cloud import storage
 
 from fastapi import Body, FastAPI, UploadFile, File, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -597,27 +598,34 @@ async def create_agent(
         from auth import hash_password
         hashed_password = hash_password(password)
 
-        # Handle profile photo upload
-        photo_path = None
+        # --- GCS UPLOAD UTILS ---
+        GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME", "applydi-agent-photos")
+        def upload_profile_photo_to_gcs(file: UploadFile) -> str:
+            """Upload a file to Google Cloud Storage and return its public URL."""
+            client = storage.Client()
+            bucket = client.bucket(GCS_BUCKET_NAME)
+            # Nom unique
+            filename = f"{int(time.time())}_{file.filename.replace(' ', '_')}"
+            blob = bucket.blob(filename)
+            blob.upload_from_file(file.file, content_type=file.content_type)
+            # Ne pas appeler blob.make_public() car UBLA est activé
+            return blob.public_url
+
+        # Handle profile photo upload vers GCS
+        photo_url = None
         if profile_photo is not None:
             try:
-                upload_dir = "profile_photos"
-                os.makedirs(upload_dir, exist_ok=True)
-                file_ext = os.path.splitext(profile_photo.filename)[1]
-                safe_filename = f"{int(time.time())}_{profile_photo.filename.replace(' ', '_')}"
-                photo_path = os.path.join(upload_dir, safe_filename)
-                with open(photo_path, "wb") as buffer:
-                    shutil.copyfileobj(profile_photo.file, buffer)
-                logger.info(f"[CREATE_AGENT] Photo de profil sauvegardée: {photo_path}")
+                photo_url = upload_profile_photo_to_gcs(profile_photo)
+                logger.info(f"[CREATE_AGENT] Photo de profil uploadée sur GCS: {photo_url}")
             except Exception as file_err:
-                logger.error(f"[CREATE_AGENT] Erreur lors de la sauvegarde de la photo: {file_err}")
-                raise HTTPException(status_code=500, detail=f"Erreur lors de la sauvegarde de la photo: {file_err}")
+                logger.error(f"[CREATE_AGENT] Erreur lors de l'upload GCS: {file_err}")
+                raise HTTPException(status_code=500, detail=f"Erreur lors de l'upload de la photo sur GCS: {file_err}")
 
         db_agent = Agent(
             name=name,
             contexte=contexte,
             biographie=biographie,
-            profile_photo=photo_path,
+            profile_photo=photo_url,
             email=email,
             password=hashed_password,
             user_id=int(user_id)
