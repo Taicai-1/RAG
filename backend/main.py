@@ -1,3 +1,7 @@
+# Endpoint de connexion agent (email + password)
+from pydantic import BaseModel
+
+
 from google.cloud import storage
 
 from fastapi import Body, FastAPI, UploadFile, File, Depends, HTTPException, Request
@@ -697,6 +701,91 @@ async def get_agent(
     except Exception as e:
         logger.error(f"Error getting agent: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+class AgentLogin(BaseModel):
+    email: str
+    password: str
+
+@app.post("/login-agent")
+async def login_agent(agent: AgentLogin, db: Session = Depends(get_db)):
+    """Login agent by email and password"""
+    try:
+        db_agent = db.query(Agent).filter(Agent.email == agent.email).first()
+        if not db_agent or not verify_password(agent.password, db_agent.password):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        access_token = create_access_token(data={"sub": str(db_agent.id), "agent": True})
+        logger.info(f"Agent logged in: {agent.email}")
+        return {"access_token": access_token, "agent_id": db_agent.id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Login agent error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+# Endpoint pour modifier un agent existant
+from fastapi import Form
+@app.put("/agents/{agent_id}")
+async def update_agent(
+    agent_id: int,
+    name: str = Form(...),
+    contexte: str = Form(None),
+    biographie: str = Form(None),
+    email: str = Form(...),
+    password: str = Form(None),
+    profile_photo: UploadFile = File(None),
+    user_id: str = Depends(verify_token),
+    db: Session = Depends(get_db)
+):
+    """Met à jour un agent existant, y compris la photo de profil (GCS)."""
+    try:
+        agent = db.query(Agent).filter(
+            Agent.id == agent_id,
+            Agent.user_id == int(user_id)
+        ).first()
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        # Vérifier si l'email est déjà utilisé par un autre agent
+        if email != agent.email:
+            if db.query(Agent).filter(Agent.email == email).first():
+                raise HTTPException(status_code=400, detail="Email already registered for another agent")
+
+        agent.name = name
+        agent.contexte = contexte
+        agent.biographie = biographie
+        agent.email = email
+        if password:
+            from auth import hash_password
+            agent.password = hash_password(password)
+
+        # --- GCS UPLOAD UTILS ---
+        GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME", "applydi-agent-photos")
+        def upload_profile_photo_to_gcs(file: UploadFile) -> str:
+            """Upload a file to Google Cloud Storage and return its public URL."""
+            client = storage.Client()
+            bucket = client.bucket(GCS_BUCKET_NAME)
+            filename = f"{int(time.time())}_{file.filename.replace(' ', '_')}"
+            blob = bucket.blob(filename)
+            blob.upload_from_file(file.file, content_type=file.content_type)
+            return blob.public_url
+
+        if profile_photo is not None:
+            try:
+                photo_url = upload_profile_photo_to_gcs(profile_photo)
+                agent.profile_photo = photo_url
+            except Exception as file_err:
+                logger.error(f"[UPDATE_AGENT] Erreur lors de l'upload GCS: {file_err}")
+                raise HTTPException(status_code=500, detail=f"Erreur lors de l'upload de la photo sur GCS: {file_err}")
+
+        db.commit()
+        db.refresh(agent)
+        logger.info(f"[UPDATE_AGENT] Agent modifié avec succès: id={agent.id}, email={agent.email}")
+        return {"agent": agent}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[UPDATE_AGENT] Erreur inattendue: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la modification de l'agent: {e}")
 
 ## Suppression des endpoints de génération de fichiers CSV et PDF
 

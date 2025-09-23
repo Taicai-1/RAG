@@ -3,9 +3,11 @@ import { useRouter } from "next/router";
 import axios from "axios";
 import toast, { Toaster } from "react-hot-toast";
 import { 
+// ...existing code...
   Bot, 
   Plus, 
   Trash2, 
+  Pencil, 
   ArrowRight, 
   LogOut,
   Users,
@@ -55,6 +57,20 @@ const AGENT_TYPES = {
 };
 
 export default function AgentsPage() {
+  const [editingAgent, setEditingAgent] = useState(null); // agent en cours d'édition
+  // Fonction pour pré-remplir le formulaire avec les infos de l'agent à éditer
+  const handleEditAgent = (agent) => {
+    setForm({
+      name: agent.name || "",
+      contexte: agent.contexte || "",
+      biographie: agent.biographie || "",
+      profile_photo: null, // pas de pré-remplissage du fichier
+      email: agent.email || "",
+      password: "" // Toujours vide pour l'édition
+    });
+    setEditingAgent(agent);
+    setShowForm(true);
+  };
   const [agents, setAgents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [token, setToken] = useState("");
@@ -150,7 +166,7 @@ export default function AgentsPage() {
         </button>
         {showForm && (
           <div className="mt-6 bg-white rounded-lg shadow-lg p-6 max-w-md mx-auto">
-            <h2 className="text-xl font-semibold mb-4">Créer un nouveau companion IA</h2>
+            <h2 className="text-xl font-semibold mb-4">{editingAgent ? "Modifier l'agent" : "Créer un nouveau companion IA"}</h2>
             <div className="space-y-4">
               <input type="text" className="w-full px-3 py-2 border rounded-lg" placeholder="Nom" value={form.name} onChange={e => setForm(f => ({...f, name: e.target.value}))} />
               <textarea className="w-full px-3 py-2 border rounded-lg" placeholder="Contexte" value={form.contexte} onChange={e => setForm(f => ({...f, contexte: e.target.value}))} />
@@ -162,13 +178,19 @@ export default function AgentsPage() {
                     alt="Aperçu"
                     className="w-24 h-24 object-cover rounded-full border-2 border-blue-400 shadow mb-2"
                   />
+                ) : editingAgent && editingAgent.profile_photo ? (
+                  <img
+                    src={editingAgent.profile_photo.startsWith('http') ? editingAgent.profile_photo : `${API_URL}/profile_photos/${editingAgent.profile_photo.replace(/^.*[\\/]/, '')}`}
+                    alt="Aperçu"
+                    className="w-24 h-24 object-cover rounded-full border-2 border-blue-400 shadow mb-2"
+                  />
                 ) : (
                   <div className="w-24 h-24 rounded-full border-2 border-dashed border-blue-300 flex items-center justify-center text-blue-300 mb-2">
                     <span className="text-3xl">+</span>
                   </div>
                 )}
                 <label className="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium cursor-pointer hover:bg-blue-700 transition-colors">
-                  {form.profile_photo ? 'Changer la photo' : 'Choisir une photo'}
+                  {form.profile_photo || (editingAgent && editingAgent.profile_photo) ? 'Changer la photo' : 'Choisir une photo'}
                   <input
                     type="file"
                     accept="image/*"
@@ -201,15 +223,22 @@ export default function AgentsPage() {
                     if (form.profile_photo) formData.append("profile_photo", form.profile_photo);
                     formData.append("email", form.email);
                     formData.append("password", form.password);
-                    await axios.post(`${API_URL}/agents`, formData, {
-                      headers: { Authorization: `Bearer ${token}`, "Content-Type": "multipart/form-data" }
-                    });
-                    toast.success("Agent créé avec succès !");
+                    if (editingAgent) {
+                      await axios.put(`${API_URL}/agents/${editingAgent.id}`, formData, {
+                        headers: { Authorization: `Bearer ${token}`, "Content-Type": "multipart/form-data" }
+                      });
+                      toast.success("Agent modifié avec succès !");
+                    } else {
+                      await axios.post(`${API_URL}/agents`, formData, {
+                        headers: { Authorization: `Bearer ${token}`, "Content-Type": "multipart/form-data" }
+                      });
+                      toast.success("Agent créé avec succès !");
+                    }
                     setShowForm(false);
                     setForm({ name: "", contexte: "", biographie: "", profile_photo: null, email: "", password: "" });
                     loadAgents(token);
                   } catch (err) {
-                    toast.error("Erreur lors de la création");
+                    toast.error(editingAgent ? "Erreur lors de la modification" : "Erreur lors de la création");
                   } finally {
                     setCreating(false);
                   }
@@ -217,7 +246,7 @@ export default function AgentsPage() {
                 className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
                 disabled={creating}
               >
-                {creating ? "Création..." : "Créer"}
+                {creating ? (editingAgent ? "Modification..." : "Création...") : (editingAgent ? "Modifier" : "Créer")}
               </button>
             </div>
           </div>
@@ -255,16 +284,25 @@ export default function AgentsPage() {
                         <IconComponent className="w-6 h-6 text-white" />
                       </div>
                     )}
-                    <button
-                      onClick={e => {
-                        e.stopPropagation();
-                        deleteAgent(agent.id);
-                      }}
-                      className="p-2 text-gray-400 hover:text-red-600 transition-colors opacity-0 group-hover:opacity-100"
-                      title="Supprimer"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+                    <div className="flex space-x-2">
+                      <button
+                        onClick={e => { e.stopPropagation(); handleEditAgent(agent); }}
+                        className="p-2 text-gray-400 hover:text-blue-600 transition-colors opacity-0 group-hover:opacity-100"
+                        title="Éditer"
+                      >
+                        <Pencil className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={e => {
+                          e.stopPropagation();
+                          deleteAgent(agent.id);
+                        }}
+                        className="p-2 text-gray-400 hover:text-red-600 transition-colors opacity-0 group-hover:opacity-100"
+                        title="Supprimer"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
                   </div>
                   <h3 className="text-xl font-semibold text-gray-900 mb-2">{agent.name}</h3>
                   <button
