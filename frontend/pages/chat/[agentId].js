@@ -1,7 +1,7 @@
+
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/router";
 import axios from "axios";
-import Image from "next/image";
 import Link from "next/link";
 
 const getApiUrl = () => {
@@ -17,30 +17,23 @@ export default function AgentChatPage() {
   const router = useRouter();
   const { agentId } = router.query;
   const [agent, setAgent] = useState(null);
-  const [messages, setMessages] = useState([]); // {role: 'user'|'agent', content: string}
+  const [conversations, setConversations] = useState([]);
+  const [selectedConv, setSelectedConv] = useState(null);
+  const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [token, setToken] = useState("");
   const chatEndRef = useRef(null);
+  const [creatingConv, setCreatingConv] = useState(false);
+  const [newConvTitle, setNewConvTitle] = useState("");
 
-  // Charger l'historique du chat depuis localStorage et l'agent
   useEffect(() => {
     const savedToken = localStorage.getItem("token");
     if (!savedToken) router.push("/login");
     setToken(savedToken);
     if (agentId) {
       loadAgent(agentId, savedToken);
-      // Charger l'historique local
-      const localHistory = localStorage.getItem(`chat_history_${agentId}`);
-      if (localHistory) {
-        try {
-          setMessages(JSON.parse(localHistory));
-        } catch {
-          setMessages([]);
-        }
-      } else {
-        setMessages([]);
-      }
+      loadConversations(agentId, savedToken);
     }
   }, [agentId]);
 
@@ -57,43 +50,102 @@ export default function AgentChatPage() {
     }
   };
 
-  const sendMessage = async () => {
-    if (!input.trim()) return;
-    const newMessages = [...messages, { role: "user", content: input }];
-    setMessages(newMessages);
-    setInput("");
-    setLoading(true);
-    // Sauvegarder dans localStorage immédiatement
-    if (agentId) {
-      localStorage.setItem(`chat_history_${agentId}` , JSON.stringify(newMessages));
-    }
+  const loadConversations = async (agentId, authToken) => {
     try {
-      const response = await axios.post(
-        `${API_URL}/ask`,
-        {
-          question: input,
-          agent_id: agentId,
-          history: newMessages.filter(m => m.role !== "system")
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-        }
-      );
-      const updatedMessages = [...newMessages, { role: "agent", content: response.data.answer }];
-      setMessages(updatedMessages);
-      // Mettre à jour localStorage avec la réponse de l'agent
-      if (agentId) {
-        localStorage.setItem(`chat_history_${agentId}` , JSON.stringify(updatedMessages));
+      const res = await axios.get(`${API_URL}/conversations?agent_id=${agentId}`, {
+        headers: { Authorization: `Bearer ${authToken}` }
+      });
+      setConversations(res.data);
+      if (res.data.length > 0) {
+        selectConversation(res.data[0].id, authToken);
       }
     } catch (e) {
-      const updatedMessages = [...newMessages, { role: "agent", content: "Erreur lors de la réponse de l'agent." }];
-      setMessages(updatedMessages);
-      if (agentId) {
-        localStorage.setItem(`chat_history_${agentId}` , JSON.stringify(updatedMessages));
-      }
+      setConversations([]);
+    }
+  };
+
+  const selectConversation = async (convId, authToken = token) => {
+    setSelectedConv(convId);
+    setMessages([]);
+    try {
+      const res = await axios.get(`${API_URL}/conversations/${convId}/messages`, {
+        headers: { Authorization: `Bearer ${authToken}` }
+      });
+      setMessages(res.data);
+    } catch (e) {
+      setMessages([]);
+    }
+  };
+
+  const handleNewConversation = async () => {
+    if (!newConvTitle.trim()) return;
+    setCreatingConv(true);
+    try {
+      const res = await axios.post(`${API_URL}/conversations`, {
+        agent_id: agentId,
+        title: newConvTitle
+      }, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setNewConvTitle("");
+      setCreatingConv(false);
+      await loadConversations(agentId, token);
+    } catch (e) {
+      setCreatingConv(false);
+    }
+  };
+
+  const sendMessage = async () => {
+    if (!input.trim() || !selectedConv) return;
+    // Ajoute immédiatement le message utilisateur dans le state
+    setMessages(prev => [
+      ...prev,
+      { role: "user", content: input }
+    ]);
+    setLoading(true);
+    const userMessage = input;
+    setInput("");
+    try {
+      // Ajoute le message utilisateur côté backend
+      await axios.post(`${API_URL}/conversations/${selectedConv}/messages`, {
+        conversation_id: selectedConv,
+        role: "user",
+        content: userMessage
+      }, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      // Récupère l'historique de la conversation (messages)
+      const resHist = await axios.get(`${API_URL}/conversations/${selectedConv}/messages`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const history = resHist.data.map(m => ({ role: m.role, content: m.content }));
+
+      // Appel à l'API /ask pour générer la réponse IA
+      const resAsk = await axios.post(`${API_URL}/ask`, {
+        question: userMessage,
+        agent_id: agentId,
+        history: history
+      }, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      });
+      const iaAnswer = resAsk.data.answer || "[Erreur IA]";
+
+      // Ajoute la réponse IA comme message d'agent côté backend
+      await axios.post(`${API_URL}/conversations/${selectedConv}/messages`, {
+        conversation_id: selectedConv,
+        role: "agent",
+        content: iaAnswer
+      }, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      await selectConversation(selectedConv);
+    } catch (e) {
+      setLoading(false);
     } finally {
       setLoading(false);
       setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
@@ -108,29 +160,57 @@ export default function AgentChatPage() {
 
   return (
     <div className="min-h-screen flex flex-row bg-gradient-to-br from-blue-50 to-orange-50">
-      {/* Colonne gauche : photo et bio */}
-      <div className="w-full md:w-1/2 flex flex-col items-center justify-center p-10 bg-gradient-to-br from-blue-100 to-orange-100 border-r border-blue-200">
-        {agent.profile_photo && (
-          <div className="w-64 h-64 rounded-xl overflow-hidden border-4 border-blue-300 shadow-lg mb-8">
-            <img
-              src={
-                agent.profile_photo.startsWith('http')
-                  ? agent.profile_photo
-                  : `${API_URL}/profile_photos/${agent.profile_photo.replace(/^.*[\\/]/, '')}`
-              }
-              alt={agent.name}
-              width={320}
-              height={320}
-              style={{ objectFit: "cover" }}
-              className="w-full h-full"
-              onError={e => { e.target.onerror = null; e.target.src = '/default-avatar.png'; }}
+      {/* Colonne gauche : liste des conversations */}
+      <div className="w-80 min-w-[18rem] max-w-xs flex flex-col border-r border-blue-200 bg-gradient-to-br from-blue-100 to-orange-100 p-4">
+        <div className="flex flex-col items-center mb-6">
+          {agent.profile_photo && (
+            <div className="w-24 h-24 rounded-xl overflow-hidden border-4 border-blue-300 shadow mb-2">
+              <img
+                src={agent.profile_photo.startsWith('http') ? agent.profile_photo : `${API_URL}/profile_photos/${agent.profile_photo.replace(/^.*[\\/]/, '')}`}
+                alt={agent.name}
+                width={96}
+                height={96}
+                style={{ objectFit: "cover" }}
+                className="w-full h-full"
+                onError={e => { e.target.onerror = null; e.target.src = '/default-avatar.png'; }}
+              />
+            </div>
+          )}
+          <h1 className="text-xl font-bold text-gray-800 text-center uppercase tracking-wide mt-2">{agent.name}</h1>
+        </div>
+        <button
+          className="w-full bg-blue-600 text-white py-2 rounded-lg font-semibold hover:bg-blue-700 mb-4"
+          onClick={() => setNewConvTitle("Nouvelle conversation")}
+        >
+          + Nouvelle conversation
+        </button>
+        {newConvTitle !== "" && (
+          <div className="mb-4 flex flex-col gap-2">
+            <input
+              className="px-3 py-2 border rounded-lg"
+              placeholder="Titre de la conversation"
+              value={newConvTitle}
+              onChange={e => setNewConvTitle(e.target.value)}
+              autoFocus
             />
+            <div className="flex gap-2">
+              <button className="flex-1 bg-blue-600 text-white py-1 rounded-lg" onClick={handleNewConversation} disabled={creatingConv}>Créer</button>
+              <button className="flex-1 bg-gray-200 py-1 rounded-lg" onClick={() => setNewConvTitle("")}>Annuler</button>
+            </div>
           </div>
         )}
-        <h1 className="text-4xl font-bold text-gray-800 mb-2 text-center uppercase tracking-wide">{agent.name}</h1>
-        <h2 className="text-lg text-blue-700 font-semibold mb-4 text-center">{agent.titre || ''}</h2>
-        <div className="bg-white bg-opacity-80 rounded-lg p-6 shadow max-w-xl text-center">
-          <p className="text-gray-700 text-lg whitespace-pre-line">{agent.biographie}</p>
+        <div className="flex-1 overflow-y-auto">
+          {conversations.length === 0 && <div className="text-gray-500 text-center mt-8">Aucune conversation</div>}
+          {conversations.map(conv => (
+            <div
+              key={conv.id}
+              className={`p-3 rounded-lg mb-2 cursor-pointer ${selectedConv === conv.id ? "bg-blue-200 font-bold" : "bg-white hover:bg-blue-100"}`}
+              onClick={() => selectConversation(conv.id)}
+            >
+              <div className="truncate">{conv.title || `Conversation ${conv.id}`}</div>
+              <div className="text-xs text-gray-500">{new Date(conv.created_at).toLocaleString()}</div>
+            </div>
+          ))}
         </div>
       </div>
       {/* Colonne droite : chat */}
@@ -144,15 +224,37 @@ export default function AgentChatPage() {
         </div>
         {/* Chat area */}
         <div className="flex-1 overflow-y-auto px-4 py-8 flex flex-col space-y-4 bg-gradient-to-br from-white to-orange-50">
-          {messages.map((msg, idx) => (
-            <div key={idx} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-              <div className={`rounded-2xl px-4 py-3 shadow-sm max-w-[70%] whitespace-pre-line ${msg.role === "user" ? "bg-blue-600 text-white rounded-br-none" : "bg-white text-gray-900 rounded-bl-none border"}`}>
-                {msg.content}
+          {messages.map((msg, idx) => {
+            const isLastAgentMsg =
+              msg.role === "agent" &&
+              idx === messages.length - 1 &&
+              !msg.feedback;
+            return (
+              <div key={idx} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                <div className={`rounded-2xl px-4 py-3 shadow-sm max-w-[70%] whitespace-pre-line ${msg.role === "user" ? "bg-blue-600 text-white rounded-br-none" : "bg-white text-gray-900 rounded-bl-none border"}`}>
+                  {msg.content}
+                  {/* Bouton de feedback uniquement sur le dernier message agent sans feedback */}
+                  {isLastAgentMsg && (
+                    <div className="flex gap-2 mt-2">
+                      <button
+                        className="text-xl text-gray-400 hover:text-green-600"
+                        title="Satisfait"
+                        onClick={async () => {
+                          // Optimistic update: retire le bouton localement
+                          setMessages(prevMsgs => prevMsgs.map((m, i) => i === idx ? { ...m, feedback: 'like' } : m));
+                          try {
+                            await axios.patch(`${API_URL}/messages/${msg.id}/feedback`, { feedback: 'like' }, { headers: { Authorization: `Bearer ${token}` } });
+                          } catch {}
+                        }}
+                      >👍</button>
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
-          {/* Bulle de typing animée */}
-          {loading && (
+            );
+          })}
+          {/* Affiche les trois petits points à gauche si loading et le dernier message est celui de l'utilisateur */}
+          {loading && messages.length > 0 && messages[messages.length-1].role === "user" && (
             <div className="flex justify-start">
               <div className="rounded-2xl px-4 py-3 shadow-sm max-w-[70%] bg-white text-gray-900 rounded-bl-none border flex items-center">
                 <span className="inline-block w-2 h-2 bg-gray-400 rounded-full animate-bounce mr-1" style={{animationDelay: '0ms'}}></span>
@@ -172,12 +274,12 @@ export default function AgentChatPage() {
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={e => e.key === "Enter" && sendMessage()}
-            disabled={loading}
+            disabled={loading || !selectedConv}
           />
           <button
             onClick={sendMessage}
             className="bg-blue-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-blue-700 transition-colors disabled:opacity-50"
-            disabled={loading || !input.trim()}
+            disabled={loading || !input.trim() || !selectedConv}
           >
             Envoyer
           </button>
@@ -185,4 +287,4 @@ export default function AgentChatPage() {
       </div>
     </div>
   );
-  }
+}

@@ -1,4 +1,14 @@
-# Endpoint de connexion agent (email + password)
+# Endpoint pour renommer une conversation
+from fastapi import Body
+
+from pydantic import BaseModel
+
+
+from models_conversation import Conversation, Message
+from pydantic import BaseModel
+from typing import List, Optional
+
+
 from pydantic import BaseModel
 
 
@@ -792,3 +802,76 @@ async def update_agent(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8080)
+
+class ConversationCreate(BaseModel):
+    agent_id: int
+    title: Optional[str] = None
+
+class MessageCreate(BaseModel):
+    conversation_id: int
+    role: str
+    content: str
+
+@app.post("/conversations", response_model=dict)
+async def create_conversation(conv: ConversationCreate, db: Session = Depends(get_db)):
+    conversation = Conversation(agent_id=conv.agent_id, title=conv.title)
+    db.add(conversation)
+    db.commit()
+    db.refresh(conversation)
+    return {"conversation_id": conversation.id}
+
+@app.get("/conversations", response_model=List[dict])
+async def list_conversations(agent_id: int, db: Session = Depends(get_db)):
+    conversations = db.query(Conversation).filter(Conversation.agent_id == agent_id).order_by(Conversation.created_at.desc()).all()
+    return [{"id": c.id, "title": c.title, "created_at": c.created_at} for c in conversations]
+
+@app.post("/conversations/{conversation_id}/messages", response_model=dict)
+async def add_message(conversation_id: int, msg: MessageCreate, db: Session = Depends(get_db)):
+    message = Message(conversation_id=conversation_id, role=msg.role, content=msg.content)
+    db.add(message)
+    db.commit()
+    db.refresh(message)
+    return {"message_id": message.id}
+
+@app.get("/conversations/{conversation_id}/messages", response_model=List[dict])
+async def get_messages(conversation_id: int, db: Session = Depends(get_db)):
+    messages = db.query(Message).filter(Message.conversation_id == conversation_id).order_by(Message.timestamp.asc()).all()
+    return [{"id": m.id, "role": m.role, "content": m.content, "timestamp": m.timestamp} for m in messages]
+# Endpoint de connexion agent (email + password)
+class FeedbackRequest(BaseModel):
+    feedback: str  # 'like' ou 'dislike'
+
+@app.patch("/messages/{message_id}/feedback")
+async def set_message_feedback(message_id: int, req: FeedbackRequest, db: Session = Depends(get_db)):
+    msg = db.query(Message).filter(Message.id == message_id).first()
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if req.feedback not in ("like", "dislike"):
+        raise HTTPException(status_code=400, detail="Feedback must be 'like' or 'dislike'")
+    msg.feedback = req.feedback
+    db.commit()
+    return {"message_id": msg.id, "feedback": msg.feedback}
+# --- Endpoints pour conversations et messages ---
+class ConversationTitleUpdate(BaseModel):
+    title: str
+
+@app.put("/conversations/{conversation_id}/title")
+async def update_conversation_title(conversation_id: int, data: ConversationTitleUpdate, db: Session = Depends(get_db)):
+    conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    conv.title = data.title
+    db.commit()
+    db.refresh(conv)
+    return {"id": conv.id, "title": conv.title}
+
+# Endpoint pour supprimer une conversation
+@app.delete("/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: int, db: Session = Depends(get_db)):
+    conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    db.delete(conv)
+    db.commit()
+    return {"message": "Conversation deleted"}
+# Endpoint pour feedback sur un message
