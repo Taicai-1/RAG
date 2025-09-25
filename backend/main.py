@@ -874,4 +874,3 @@ async def delete_conversation(conversation_id: int, db: Session = Depends(get_db
     db.delete(conv)
     db.commit()
     return {"message": "Conversation deleted"}
-# Endpoint pour feedback sur un message

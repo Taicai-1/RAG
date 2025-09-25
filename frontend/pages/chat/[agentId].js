@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/router";
 import axios from "axios";
 import Link from "next/link";
+import { Pencil, Trash2 } from "lucide-react";
 
 const getApiUrl = () => {
   if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL;
@@ -25,6 +26,8 @@ export default function AgentChatPage() {
   const [token, setToken] = useState("");
   const chatEndRef = useRef(null);
   const [creatingConv, setCreatingConv] = useState(false);
+  const [editingTitleId, setEditingTitleId] = useState(null);
+  const [editedTitle, setEditedTitle] = useState("");
   const [newConvTitle, setNewConvTitle] = useState("");
 
   useEffect(() => {
@@ -78,22 +81,48 @@ export default function AgentChatPage() {
   };
 
   const handleNewConversation = async () => {
-    if (!newConvTitle.trim()) return;
-    setCreatingConv(true);
-    try {
-      const res = await axios.post(`${API_URL}/conversations`, {
-        agent_id: agentId,
-        title: newConvTitle
-      }, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      setNewConvTitle("");
-      setCreatingConv(false);
-      await loadConversations(agentId, token);
-    } catch (e) {
-      setCreatingConv(false);
+  setCreatingConv(true);
+  try {
+    const res = await axios.post(`${API_URL}/conversations`, {
+      agent_id: agentId,
+      title: null
+    }, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    setCreatingConv(false);
+    await loadConversations(agentId, token);
+    if (res.data.conversation_id) {
+      setSelectedConv(res.data.conversation_id);
+      setMessages([]);
     }
-  };
+  } catch (e) {
+    setCreatingConv(false);
+  }
+};
+
+const handleEditTitle = async (convId) => {
+  try {
+    await axios.put(`${API_URL}/conversations/${convId}/title`, { title: editedTitle }, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    setEditingTitleId(null);
+    setEditedTitle("");
+    await loadConversations(agentId, token);
+  } catch {}
+};
+
+const handleDeleteConversation = async (convId) => {
+  if (!window.confirm("Supprimer cette conversation ?")) return;
+  try {
+    await axios.delete(`${API_URL}/conversations/${convId}`,
+      { headers: { Authorization: `Bearer ${token}` } });
+    await loadConversations(agentId, token);
+    if (selectedConv === convId) {
+      setSelectedConv(null);
+      setMessages([]);
+    }
+  } catch {}
+};
 
   const sendMessage = async () => {
     if (!input.trim() || !selectedConv) return;
@@ -106,6 +135,14 @@ export default function AgentChatPage() {
     const userMessage = input;
     setInput("");
     try {
+      // Si la conversation n'a pas de titre, le mettre à jour avec la première question
+      const conv = conversations.find(c => c.id === selectedConv);
+      if (conv && (!conv.title || conv.title === "")) {
+        await axios.put(`${API_URL}/conversations/${selectedConv}/title`, { title: userMessage }, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        await loadConversations(agentId, token);
+      }
       // Ajoute le message utilisateur côté backend
       await axios.post(`${API_URL}/conversations/${selectedConv}/messages`, {
         conversation_id: selectedConv,
@@ -180,38 +217,53 @@ export default function AgentChatPage() {
         </div>
         <button
           className="w-full bg-blue-600 text-white py-2 rounded-lg font-semibold hover:bg-blue-700 mb-4"
-          onClick={() => setNewConvTitle("Nouvelle conversation")}
+          onClick={handleNewConversation}
+          disabled={creatingConv}
         >
           + Nouvelle conversation
         </button>
-        {newConvTitle !== "" && (
-          <div className="mb-4 flex flex-col gap-2">
-            <input
-              className="px-3 py-2 border rounded-lg"
-              placeholder="Titre de la conversation"
-              value={newConvTitle}
-              onChange={e => setNewConvTitle(e.target.value)}
-              autoFocus
-            />
-            <div className="flex gap-2">
-              <button className="flex-1 bg-blue-600 text-white py-1 rounded-lg" onClick={handleNewConversation} disabled={creatingConv}>Créer</button>
-              <button className="flex-1 bg-gray-200 py-1 rounded-lg" onClick={() => setNewConvTitle("")}>Annuler</button>
-            </div>
-          </div>
-        )}
         <div className="flex-1 overflow-y-auto">
           {conversations.length === 0 && <div className="text-gray-500 text-center mt-8">Aucune conversation</div>}
           {conversations.map(conv => (
             <div
               key={conv.id}
-              className={`p-3 rounded-lg mb-2 cursor-pointer ${selectedConv === conv.id ? "bg-blue-200 font-bold" : "bg-white hover:bg-blue-100"}`}
-              onClick={() => selectConversation(conv.id)}
+              className={`p-3 rounded-lg mb-2 cursor-pointer flex items-center justify-between ${selectedConv === conv.id ? "bg-blue-200 font-bold" : "bg-white hover:bg-blue-100"}`}
+              onClick={e => { if (e.target === e.currentTarget) selectConversation(conv.id); }}
             >
-              <div className="truncate">{conv.title || `Conversation ${conv.id}`}</div>
-              <div className="text-xs text-gray-500">{new Date(conv.created_at).toLocaleString()}</div>
+              <div className="flex-1 min-w-0" onClick={() => selectConversation(conv.id)}>
+                {editingTitleId === conv.id ? (
+                  <input
+                    className="px-2 py-1 border rounded"
+                    value={editedTitle}
+                    onChange={e => setEditedTitle(e.target.value)}
+                    onBlur={() => handleEditTitle(conv.id)}
+                    onKeyDown={e => { if (e.key === "Enter") handleEditTitle(conv.id); }}
+                    autoFocus
+                  />
+                ) : (
+                  <span className="truncate">{conv.title || `Conversation ${conv.id}`}</span>
+                )}
+                <div className="text-xs text-gray-500">{new Date(conv.created_at).toLocaleString()}</div>
+              </div>
+              <div className="flex items-center ml-2 gap-1">
+                <button
+                  className="p-1 text-gray-400 hover:text-blue-600"
+                  title="Renommer"
+                  onClick={e => { e.stopPropagation(); setEditingTitleId(conv.id); setEditedTitle(conv.title || ""); }}
+                >
+                  <Pencil className="w-4 h-4" />
+                </button>
+                <button
+                  className="p-1 text-gray-400 hover:text-red-600"
+                  title="Supprimer"
+                  onClick={e => { e.stopPropagation(); handleDeleteConversation(conv.id); }}
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
             </div>
           ))}
-        </div>
+      </div>
       </div>
       {/* Colonne droite : chat */}
       <div className="flex-1 flex flex-col h-screen">
