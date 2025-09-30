@@ -90,8 +90,17 @@ def get_direct_gpt_response(question: str, db: Session, agent_id: int = None) ->
         logger.error(f"Error getting direct GPT response: {e}")
         raise Exception(f"Erreur lors du traitement de votre question : {str(e)}")
 
-def get_answer(question: str, user_id: int, db: Session, selected_doc_ids: List[int] = None, agent_id: int = None) -> str:
-    """Get answer using RAG for specific user with OpenAI - always using embeddings"""
+
+def get_answer(
+    question: str,
+    user_id: int,
+    db: Session,
+    selected_doc_ids: List[int] = None,
+    agent_id: int = None,
+    history: list = None,
+    model_id: str = None
+) -> str:
+    """Get answer using RAG for specific user with OpenAI - always using embeddings, memory, and custom model if provided"""
     try:
         # Get user's documents (filter by selected documents if provided)
         if selected_doc_ids:
@@ -103,110 +112,81 @@ def get_answer(question: str, user_id: int, db: Session, selected_doc_ids: List[
         else:
             user_docs = db.query(Document).filter(Document.user_id == user_id).all()
             logger.info(f"Using all {len(user_docs)} user documents")
-            
+
+        # Récupérer le contexte personnalisé de l'agent par son id
+        agent = None
+        contexte_agent = ""
+        if agent_id:
+            agent = db.query(Agent).filter(Agent.id == agent_id).first()
+        if not agent:
+            agent = db.query(Agent).filter(Agent.user_id == user_id).first()
+        contexte_agent = agent.contexte if agent and agent.contexte else ""
+
+        # Si pas de documents, fallback sur le contexte + mémoire
         if not user_docs:
             if selected_doc_ids:
                 return "Aucun des documents sélectionnés n'a été trouvé. Veuillez vérifier votre sélection."
             else:
-                # No documents available - use direct GPT call with agent_id
-                logger.info("No documents found, using direct GPT call with agent_id")
-                return get_direct_gpt_response(question, db, agent_id)
-        
+                logger.info("No documents found, using context + question + memory only")
+                # Prépare la liste messages pour OpenAI
+                messages = []
+                if contexte_agent:
+                    messages.append({"role": "system", "content": contexte_agent})
+                # Ajoute un résumé des 5 derniers échanges dans le prompt utilisateur
+                if history:
+                    last_msgs = history[-5:]
+                    discussion = "\n".join([f"{m['role']}: {m['content']}" for m in last_msgs])
+                    user_prompt = f"Voici la discussion en cours :\n{discussion}\n\nEt maintenant voici ma question : {question}"
+                else:
+                    user_prompt = question
+                messages.append({"role": "user", "content": user_prompt})
+                response = get_chat_response(messages, model_id=model_id)
+                return response
+
         # Always get question embedding with retry
         logger.info(f"Getting embedding for question: {question}")
         query_embedding = get_embedding(question)
         logger.info("Successfully got query embedding")
-        
+
         # Search similar chunks for this user (with optional document filtering)
         logger.info(f"Searching similar texts for user {user_id}")
         context_results = search_similar_texts_for_user(query_embedding, user_id, db, top_k=8, selected_doc_ids=selected_doc_ids)
-        
-        if not context_results:
-            return "Je n'ai pas trouvé d'informations pertinentes dans vos documents pour répondre à cette question."
-        
-        # Get complete document information
-        documents_info = get_documents_summary(user_id, db, selected_doc_ids)
-        
-        # Prepare context with document attribution
-        try:
-            # Récupérer le contexte personnalisé de l'agent par son id
-            agent = None
-            contexte_agent = ""
-            if agent_id:
-                agent = db.query(Agent).filter(Agent.id == agent_id).first()
-            if not agent:
-                agent = db.query(Agent).filter(Agent.user_id == user_id).first()
-            contexte_agent = agent.contexte if agent and agent.contexte else ""
 
-            # Get user's documents (filter by selected documents if provided)
-            if selected_doc_ids:
-                user_docs = db.query(Document).filter(
-                    Document.user_id == user_id,
-                    Document.id.in_(selected_doc_ids)
-                ).all()
-                logger.info(f"Using {len(user_docs)} selected documents: {selected_doc_ids}")
-            else:
-                user_docs = db.query(Document).filter(Document.user_id == user_id).all()
-                logger.info(f"Using all {len(user_docs)} user documents")
+        # Préparer le contexte RAG
+        context_by_document = {}
+        for result in context_results:
+            doc_name = result['document_name']
+            if doc_name not in context_by_document:
+                context_by_document[doc_name] = []
+            context_by_document[doc_name].append(result['text'])
 
-            if not user_docs:
-                if selected_doc_ids:
-                    return "Aucun des documents sélectionnés n'a été trouvé. Veuillez vérifier votre sélection."
-                else:
-                    # No documents available - utilise le contexte + question seulement
-                    logger.info("No documents found, using context + question only")
-                    prompt = f"{contexte_agent}\n\nQuestion : {question}\n\nRéponse :"
-                    response = get_chat_response(prompt)
-                    return response
+        # Build enhanced context string
+        enhanced_context = ""
+        for doc_name, contexts in context_by_document.items():
+            enhanced_context += f"\n--- Extraits du document '{doc_name}' ---\n"
+            for i, context in enumerate(contexts, 1):
+                enhanced_context += f"Extrait {i}: {context}\n"
 
-            # Always get question embedding with retry
-            logger.info(f"Getting embedding for question: {question}")
-            query_embedding = get_embedding(question)
-            logger.info("Successfully got query embedding")
-
-            # Search similar chunks for this user (with optional document filtering)
-            logger.info(f"Searching similar texts for user {user_id}")
-            context_results = search_similar_texts_for_user(query_embedding, user_id, db, top_k=8, selected_doc_ids=selected_doc_ids)
-
-            if not context_results:
-                # Pas d'extraits pertinents, prompt = contexte + question
-                prompt = f"{contexte_agent}\n\nQuestion : {question}\n\nRéponse :"
-                response = get_chat_response(prompt)
-                return response
-
-            # Get complete document information
-            documents_info = get_documents_summary(user_id, db, selected_doc_ids)
-
-            # Préparer le contexte RAG
-            context_by_document = {}
-            for result in context_results:
-                doc_name = result['document_name']
-                if doc_name not in context_by_document:
-                    context_by_document[doc_name] = []
-                context_by_document[doc_name].append(result['text'])
-
-            # Build enhanced context string
-            enhanced_context = ""
-            for doc_name, contexts in context_by_document.items():
-                enhanced_context += f"\n--- Extraits du document '{doc_name}' ---\n"
-                for i, context in enumerate(contexts, 1):
-                    enhanced_context += f"Extrait {i}: {context}\n"
-
-            # Prompt final : contexte + question + extraits RAG
-            prompt = f"{contexte_agent}\n\nQuestion : {question}\n\nExtraits de documents :\n{enhanced_context}\n\nRéponse :"
-            logger.info("Getting response from OpenAI with custom prompt order (contexte, question, RAG)")
-            response = get_chat_response(prompt)
-            logger.info("Successfully got response from OpenAI")
-            return response
-        except Exception as e:
-            logger.error(f"Error getting answer: {e}")
-            raise Exception(f"Erreur lors du traitement de votre question avec l'API OpenAI : {str(e)}")
-    
+        # Prompt final : contexte + mémoire + question + extraits RAG
+        messages = []
+        if contexte_agent:
+            messages.append({"role": "system", "content": contexte_agent})
+        # Ajoute un résumé des 5 derniers échanges dans le prompt utilisateur
+        if history:
+            last_msgs = history[-5:]
+            discussion = "\n".join([f"{m['role']}: {m['content']}" for m in last_msgs])
+            user_content = f"Voici la discussion en cours :\n{discussion}\n\nEt maintenant voici ma question : {question}\n\nExtraits de documents :\n{enhanced_context}"
+        else:
+            user_content = f"{question}\n\nExtraits de documents :\n{enhanced_context}"
+        messages.append({"role": "user", "content": user_content})
+        logger.info("PROMPT FINAL ENVOYÉ À OPENAI :\n%s", json.dumps(messages, ensure_ascii=False, indent=2))
+        logger.info("Getting response from OpenAI with structured messages (system, last 5, user, RAG)")
+        response = get_chat_response(messages, model_id=model_id)
+        logger.info("Successfully got response from OpenAI")
+        return response
     except Exception as e:
         logger.error(f"Error getting answer: {e}")
-        # Re-raise the exception to propagate to the API endpoint for proper error handling
         raise Exception(f"Erreur lors du traitement de votre question avec l'API OpenAI : {str(e)}")
-
 def search_similar_texts_for_user(query_embedding: List[float], user_id: int, db: Session, top_k: int = 3, selected_doc_ids: List[int] = None) -> List[dict]:
     """Search similar texts for a specific user - returns structured data with document info"""
     try:

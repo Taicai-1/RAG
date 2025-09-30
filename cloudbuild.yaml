@@ -2,19 +2,11 @@ steps:
   # Build Backend
   - name: 'gcr.io/cloud-builders/docker'
     args: ['build', '-t', 'gcr.io/applydi/applydi-backend', './backend']
-    
+
   # Push Backend
   - name: 'gcr.io/cloud-builders/docker'
     args: ['push', 'gcr.io/applydi/applydi-backend']
-    
-  # Build Frontend
-  - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'gcr.io/applydi/applydi-frontend', './frontend']
-    
-  # Push Frontend
-  - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/applydi/applydi-frontend']
-    
+
   # Deploy Backend
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
@@ -45,7 +37,7 @@ steps:
       - 'GOOGLE_CLOUD_PROJECT=applydi,ENVIRONMENT=production,DATABASE_URL=postgresql://applydiuser:1234@34.78.169.143/readme_to_recover'
       - '--set-secrets'
       - 'OPENAI_API_KEY=OPENAI_API_KEY:latest'
-      
+
   # Get Backend URL
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: bash
@@ -55,8 +47,21 @@ steps:
         BACKEND_URL=$$(gcloud run services describe applydi-backend --region=europe-west1 --format="value(status.url)")
         echo "Backend URL: $$BACKEND_URL"
         echo "$$BACKEND_URL" > /workspace/backend_url.txt
-        
-  # Deploy Frontend with Backend URL
+
+  # Build Frontend with Backend URL as build-arg
+  - name: 'gcr.io/cloud-builders/docker'
+    entrypoint: bash
+    args:
+      - '-c'
+      - |
+        BACKEND_URL=$$(cat /workspace/backend_url.txt)
+        docker build --build-arg NEXT_PUBLIC_API_URL=$$BACKEND_URL -t gcr.io/applydi/applydi-frontend ./frontend
+
+  # Push Frontend
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/applydi/applydi-frontend']
+
+  # Deploy Frontend
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: bash
     args:

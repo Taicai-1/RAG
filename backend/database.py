@@ -60,7 +60,9 @@ class Agent(Base):
     email = Column(String(100), unique=True, nullable=False)  # email de connexion
     password = Column(String(255), nullable=False)  # mot de passe hashé
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
     created_at = Column(DateTime, default=datetime.utcnow)
+    finetuned_model_id = Column(String(255), nullable=True)  # ID du modèle OpenAI fine-tuné
 
     # Relations
     owner = relationship("User", back_populates="agents")

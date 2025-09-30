@@ -21,5 +21,6 @@ class Message(Base):
     content = Column(Text, nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
     feedback = Column(String(10), nullable=True)  # 'like', 'dislike', ou None
+    buffered = Column(Integer, default=0)  # 0 = non bufferisé, 1 = à bufferiser
 
     conversation = relationship("Conversation", back_populates="messages")

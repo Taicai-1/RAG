@@ -90,20 +90,19 @@ def get_embedding(text: str) -> list:
                 logger.error("All embedding attempts failed")
                 raise e
 
-def get_chat_response(prompt: str) -> str:
-    """Get chat response from OpenAI with robust retry logic"""
+
+
+def get_chat_response(messages: list, model_id: str = None) -> str:
+    """Get chat response from OpenAI with robust retry logic, custom model, and structured messages"""
     import time
     max_retries = 5
-    
+    model = model_id if model_id else "gpt-4"
     for attempt in range(max_retries):
         try:
-            logger.info(f"Attempting to get chat response (attempt {attempt + 1}/{max_retries})")
+            logger.info(f"Attempting to get chat response (attempt {attempt + 1}/{max_retries}) with model {model}")
             response = client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": "Vous êtes un assistant IA professionnel et précis."},
-                    {"role": "user", "content": prompt}
-                ],
+                model=model,
+                messages=messages,
                 max_tokens=1000,
                 temperature=0.7
             )

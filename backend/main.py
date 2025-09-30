@@ -91,8 +91,8 @@ async def upload_url(
 # CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Permissif pour Cloud Run
-    allow_credentials=False,  # Doit être False avec allow_origins=["*"]
+    allow_origin_regex=r"https://.*\.?taic\.ai",  # Permissif pour Cloud Run
+    allow_credentials=True,  # Doit être False avec allow_origins=["*"]
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -244,32 +244,54 @@ async def login(user: UserLogin, db: Session = Depends(get_db)):
         logger.error(f"Login error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
+# Nouvelle version de l'endpoint /ask : utilise toujours la mémoire (historique) et le modèle fine-tuné si dispo
+from models_conversation import Message
+
 @app.post("/ask")
 async def ask_question(
     request: QuestionRequest,
     user_id: str = Depends(verify_token),
     db: Session = Depends(get_db)
 ):
-    """Ask question to RAG system"""
+    """Ask question to RAG system (toujours avec mémoire et bon modèle)"""
     start_time = time.time()
-    
     try:
         logger.info(f"Processing question from user {user_id}: {request.question}")
         logger.info(f"Selected documents: {request.selected_documents}")
-        
-        # Get only the answer (plus simple)
+
+        # Récupérer l'historique complet de la conversation si conversation_id fourni
+        history = []
+        if hasattr(request, 'conversation_id') and request.conversation_id:
+            msgs = db.query(Message).filter(Message.conversation_id == request.conversation_id).order_by(Message.created_at.asc()).all()
+            history = [{"role": m.role, "content": m.content} for m in msgs]
+        elif hasattr(request, 'history') and request.history:
+            # fallback: si le frontend envoie déjà l'historique
+            history = request.history
+
+        # Récupérer le modèle fine-tuné de l'agent si dispo
+        model_id = None
+        agent = None
+        if request.agent_id:
+            from database import Agent
+            agent = db.query(Agent).filter(Agent.id == request.agent_id).first()
+            if agent and agent.finetuned_model_id:
+                model_id = agent.finetuned_model_id
+
+        # Appeler get_answer avec mémoire et model_id
         answer = get_answer(
             request.question,
             int(user_id),
             db,
             selected_doc_ids=request.selected_documents,
-            agent_id=request.agent_id
+            agent_id=request.agent_id,
+            history=history,
+            model_id=model_id
         )
-        
+
         response_time = time.time() - start_time
         logger.info(f"Question answered for user {user_id} in {response_time:.2f}s")
         event_tracker.track_question_asked(int(user_id), request.question, response_time)
-        
         return {"answer": answer}
     except Exception as e:
         logger.error(f"Error answering question for user {user_id}: {e}")
@@ -849,8 +871,20 @@ async def set_message_feedback(message_id: int, req: FeedbackRequest, db: Sessio
     if req.feedback not in ("like", "dislike"):
         raise HTTPException(status_code=400, detail="Feedback must be 'like' or 'dislike'")
     msg.feedback = req.feedback
+    # Si feedback = like, bufferise le message et le message user précédent
+    if req.feedback == "like":
+        msg.buffered = 1
+        # Cherche le message user juste avant dans la même conversation
+        prev_user_msg = db.query(Message).filter(
+            Message.conversation_id == msg.conversation_id,
+            Message.timestamp < msg.timestamp,
+            Message.role == "user"
+        ).order_by(Message.timestamp.desc()).first()
+        if prev_user_msg:
+            prev_user_msg.feedback = "like"
+            prev_user_msg.buffered = 1
     db.commit()
-    return {"message_id": msg.id, "feedback": msg.feedback}
+    return {"message_id": msg.id, "feedback": msg.feedback, "buffered": msg.buffered}
 # --- Endpoints pour conversations et messages ---
 class ConversationTitleUpdate(BaseModel):
     title: str

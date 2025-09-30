@@ -36,7 +36,7 @@ export default function AgentChatPage() {
     setToken(savedToken);
     if (agentId) {
       loadAgent(agentId, savedToken);
-      loadConversations(agentId, savedToken);
+      loadConversations(agentId, savedToken, true); // pass flag to auto-create if none
     }
   }, [agentId]);
 
@@ -53,7 +53,7 @@ export default function AgentChatPage() {
     }
   };
 
-  const loadConversations = async (agentId, authToken) => {
+  const loadConversations = async (agentId, authToken, autoCreateIfNone = false) => {
     try {
       const res = await axios.get(`${API_URL}/conversations?agent_id=${agentId}`, {
         headers: { Authorization: `Bearer ${authToken}` }
@@ -61,6 +61,9 @@ export default function AgentChatPage() {
       setConversations(res.data);
       if (res.data.length > 0) {
         selectConversation(res.data[0].id, authToken);
+      } else if (autoCreateIfNone) {
+        // Auto-create first conversation for this agent
+        await handleNewConversation(true, authToken);
       }
     } catch (e) {
       setConversations([]);
@@ -80,25 +83,27 @@ export default function AgentChatPage() {
     }
   };
 
-  const handleNewConversation = async () => {
-  setCreatingConv(true);
-  try {
-    const res = await axios.post(`${API_URL}/conversations`, {
-      agent_id: agentId,
-      title: null
-    }, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
-    setCreatingConv(false);
-    await loadConversations(agentId, token);
-    if (res.data.conversation_id) {
-      setSelectedConv(res.data.conversation_id);
-      setMessages([]);
+  const handleNewConversation = async (auto = false, overrideToken = null) => {
+    setCreatingConv(true);
+    const convCount = conversations.length + 1;
+    const convTitle = `Conversation ${convCount}`;
+    try {
+      const res = await axios.post(`${API_URL}/conversations`, {
+        agent_id: agentId,
+        title: convTitle
+      }, {
+        headers: { Authorization: `Bearer ${overrideToken || token}` }
+      });
+      setCreatingConv(false);
+      await loadConversations(agentId, overrideToken || token);
+      if (res.data.conversation_id) {
+        setSelectedConv(res.data.conversation_id);
+        setMessages([]);
+      }
+    } catch (e) {
+      setCreatingConv(false);
     }
-  } catch (e) {
-    setCreatingConv(false);
-  }
-};
+  };
 
 const handleEditTitle = async (convId) => {
   try {
@@ -241,7 +246,7 @@ const handleDeleteConversation = async (convId) => {
                     autoFocus
                   />
                 ) : (
-                  <span className="truncate">{conv.title || `Conversation ${conv.id}`}</span>
+                  <span className="truncate">{conv.title || `Conversation ${conversations.findIndex(c => c.id === conv.id) + 1}`}</span>
                 )}
                 <div className="text-xs text-gray-500">{new Date(conv.created_at).toLocaleString()}</div>
               </div>
@@ -289,8 +294,9 @@ const handleDeleteConversation = async (convId) => {
                   {isLastAgentMsg && (
                     <div className="flex gap-2 mt-2">
                       <button
-                        className="text-xl text-gray-400 hover:text-green-600"
+                        className="text-xl bg-gray-200 rounded-md p-1 hover:bg-gray-300 hover:text-green-600 transition-colors cursor-pointer border border-gray-300"
                         title="Satisfait"
+                        style={{ minWidth: 32, minHeight: 32, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                         onClick={async () => {
                           // Optimistic update: retire le bouton localement
                           setMessages(prevMsgs => prevMsgs.map((m, i) => i === idx ? { ...m, feedback: 'like' } : m));
@@ -298,7 +304,9 @@ const handleDeleteConversation = async (convId) => {
                             await axios.patch(`${API_URL}/messages/${msg.id}/feedback`, { feedback: 'like' }, { headers: { Authorization: `Bearer ${token}` } });
                           } catch {}
                         }}
-                      >👍</button>
+                      >
+                        <span role="img" aria-label="Pouce en l'air">👍</span>
+                      </button>
                     </div>
                   )}
                 </div>
