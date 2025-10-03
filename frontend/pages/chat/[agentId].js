@@ -313,10 +313,11 @@ const handleDeleteConversation = async (convId) => {
               </div>
             );
           })}
-          {/* Affiche les trois petits points à gauche si loading et le dernier message est celui de l'utilisateur */}
+          {/* Affiche "typing ..." et les trois points dans la même bulle agent si loading et le dernier message est celui de l'utilisateur */}
           {loading && messages.length > 0 && messages[messages.length-1].role === "user" && (
             <div className="flex justify-start">
-              <div className="rounded-2xl px-4 py-3 shadow-sm max-w-[70%] bg-white text-gray-900 rounded-bl-none border flex items-center">
+              <div className="rounded-2xl px-4 py-3 shadow-sm max-w-[70%] bg-white text-gray-900 rounded-bl-none border flex items-center gap-2">
+                <span className="italic text-lg text-gray-500 mr-2">typing</span>
                 <span className="inline-block w-2 h-2 bg-gray-400 rounded-full animate-bounce mr-1" style={{animationDelay: '0ms'}}></span>
                 <span className="inline-block w-2 h-2 bg-gray-400 rounded-full animate-bounce mr-1" style={{animationDelay: '150ms'}}></span>
                 <span className="inline-block w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{animationDelay: '300ms'}}></span>
