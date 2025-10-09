@@ -1,3 +1,8 @@
+nltk
+openai
+cohere
+python-dotenv
+tiktoken
 google-cloud-storage
 fastapi
 uvicorn[standard]

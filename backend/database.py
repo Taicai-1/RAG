@@ -1,9 +1,10 @@
 import os
 import logging
 from typing import List, Optional
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
+from sqlalchemy import UniqueConstraint
 from datetime import datetime
 
 # Configuration logging
@@ -49,6 +50,16 @@ class User(Base):
     documents = relationship("Document", back_populates="owner", cascade="all, delete-orphan")
     agents = relationship("Agent", back_populates="owner", cascade="all, delete-orphan")
 
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    token = Column(String(128), unique=True, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    used = Column(Boolean, default=False, nullable=False)
+
+    user = relationship("User")
+
 class Agent(Base):
     __tablename__ = "agents"
     
@@ -63,6 +74,8 @@ class Agent(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow)
     finetuned_model_id = Column(String(255), nullable=True)  # ID du modèle OpenAI fine-tuné
+    slack_bot_token = Column(String(255), nullable=True)  # Token du bot Slack associé à l'agent
+    slack_team_id = Column(String(64), nullable=True)  # ID du workspace Slack associé à l'agent
 
     # Relations
     owner = relationship("User", back_populates="agents")

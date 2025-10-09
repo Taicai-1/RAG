@@ -1,3 +1,4 @@
+
 # Contient la logique RAG améliorée
 import json
 import logging
@@ -14,6 +15,19 @@ logger = logging.getLogger(__name__)
 
 # Cache simple pour les réponses récentes
 _answer_cache = {}
+
+def get_last_message_for_agent(agent_id: int, db: Session) -> str:
+    """Retourne le dernier message envoyé à l'agent (mémoire courte par agent)."""
+    from models_conversation import Message, Conversation
+    # Récupère la dernière conversation de l'agent
+    conv = db.query(Conversation).filter(Conversation.agent_id == agent_id).order_by(Conversation.created_at.desc()).first()
+    if not conv:
+        return ""
+    # Récupère le dernier message de la conversation
+    msg = db.query(Message).filter(Message.conversation_id == conv.id).order_by(Message.timestamp.desc()).first()
+    if not msg:
+        return ""
+    return msg.content
 
 def get_answer_with_files(question: str, user_id: int, db: Session, selected_doc_ids: List[int] = None, agent_type: str = None) -> Dict[str, Any]:
     """Get answer using RAG with file generation capabilities"""
@@ -102,6 +116,10 @@ def get_answer(
 ) -> str:
     """Get answer using RAG for specific user with OpenAI - always using embeddings, memory, and custom model if provided"""
     try:
+        # Ajoute la mémoire courte par agent
+        last_agent_message = None
+        if agent_id:
+            last_agent_message = get_last_message_for_agent(agent_id, db)
         # Get user's documents (filter by selected documents if provided)
         if selected_doc_ids:
             user_docs = db.query(Document).filter(
@@ -167,10 +185,12 @@ def get_answer(
             for i, context in enumerate(contexts, 1):
                 enhanced_context += f"Extrait {i}: {context}\n"
 
-        # Prompt final : contexte + mémoire + question + extraits RAG
+        # Prompt final : contexte agent + mémoire courte + historique + question + extraits RAG
         messages = []
         if contexte_agent:
             messages.append({"role": "system", "content": contexte_agent})
+        if last_agent_message:
+            messages.append({"role": "assistant", "content": f"Mémoire agent : {last_agent_message}"})
         # Ajoute un résumé des 5 derniers échanges dans le prompt utilisateur
         if history:
             last_msgs = history[-5:]
@@ -180,7 +200,7 @@ def get_answer(
             user_content = f"{question}\n\nExtraits de documents :\n{enhanced_context}"
         messages.append({"role": "user", "content": user_content})
         logger.info("PROMPT FINAL ENVOYÉ À OPENAI :\n%s", json.dumps(messages, ensure_ascii=False, indent=2))
-        logger.info("Getting response from OpenAI with structured messages (system, last 5, user, RAG)")
+        logger.info("Getting response from OpenAI with structured messages (system, mémoire agent, last 5, user, RAG)")
         response = get_chat_response(messages, model_id=model_id)
         logger.info("Successfully got response from OpenAI")
         return response
@@ -194,17 +214,14 @@ def search_similar_texts_for_user(query_embedding: List[float], user_id: int, db
         query = db.query(DocumentChunk, Document).join(Document).filter(
             Document.user_id == user_id
         )
-        
         if selected_doc_ids:
             query = query.filter(Document.id.in_(selected_doc_ids))
-            
         chunks_with_docs = query.all()
-        
         if not chunks_with_docs:
             return []
-        
-        # Simple similarity search with document info
+        # Similarity search with document info
         similarities = []
+        chunk_map = {}  # document_id -> [chunks ordered by chunk_index]
         for chunk, document in chunks_with_docs:
             if chunk.embedding:
                 chunk_embedding = json.loads(chunk.embedding)
@@ -214,13 +231,46 @@ def search_similar_texts_for_user(query_embedding: List[float], user_id: int, db
                     'text': chunk.chunk_text,
                     'document_id': document.id,
                     'document_name': document.filename,
-                    'created_at': document.created_at.isoformat()
+                    'created_at': document.created_at.isoformat(),
+                    'chunk_index': chunk.chunk_index
                 })
-        
-        # Sort by similarity and return top_k
+                # Build chunk map for context retrieval
+                if document.id not in chunk_map:
+                    chunk_map[document.id] = []
+                chunk_map[document.id].append((chunk.chunk_index, chunk.chunk_text))
+        # Sort by similarity and get top_k
         similarities.sort(key=lambda x: x['similarity'], reverse=True)
-        return similarities[:top_k]
-    
+        top_chunks = similarities[:top_k]
+        # Ajoute les chunks voisins pour le contexte
+        context_results = []
+        for item in top_chunks:
+            doc_id = item['document_id']
+            idx = item['chunk_index']
+            # Récupère les chunks voisins (avant/après)
+            neighbors = []
+            if doc_id in chunk_map:
+                ordered_chunks = sorted(chunk_map[doc_id], key=lambda x: x[0])
+                for i, (chunk_idx, chunk_text) in enumerate(ordered_chunks):
+                    if chunk_idx == idx:
+                        # Ajoute le chunk principal
+                        neighbors.append(chunk_text)
+                        # Ajoute le chunk précédent si dispo
+                        if i > 0:
+                            neighbors.insert(0, ordered_chunks[i-1][1])
+                        # Ajoute le chunk suivant si dispo
+                        if i < len(ordered_chunks)-1:
+                            neighbors.append(ordered_chunks[i+1][1])
+                        break
+            # Concatène les chunks pour le contexte
+            context_text = "\n".join(neighbors)
+            context_results.append({
+                'similarity': item['similarity'],
+                'text': context_text,
+                'document_id': item['document_id'],
+                'document_name': item['document_name'],
+                'created_at': item['created_at']
+            })
+        return context_results
     except Exception as e:
         logger.error(f"Error searching similar texts: {e}")
         return []

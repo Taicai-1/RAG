@@ -1,3 +1,15 @@
+# --- Envoi d'email de réinitialisation ---
+import smtplib
+from email.mime.text import MIMEText
+
+
+from uuid import uuid4
+from datetime import timedelta
+
+from collections import deque
+import threading
+
+import requests
 # Endpoint pour renommer une conversation
 from fastapi import Body
 
@@ -908,3 +920,148 @@ async def delete_conversation(conversation_id: int, db: Session = Depends(get_db
     db.delete(conv)
     db.commit()
     return {"message": "Conversation deleted"}
+
+# --- SLACK WEBHOOK ENDPOINT ---
+
+
+# On garde les 500 derniers event_id pour éviter les doublons
+_recent_event_ids = deque(maxlen=500)
+_event_ids_lock = threading.Lock()
+
+
+
+@app.post("/slack/events")
+async def slack_events(request: Request, db: Session = Depends(get_db)):
+    data = await request.json()
+    event_id = data.get("event_id")
+    if event_id:
+        with _event_ids_lock:
+            if event_id in _recent_event_ids:
+                print(f"Event déjà traité, on ignore: {event_id}")
+                return {"ok": True, "info": "Duplicate event ignored"}
+            _recent_event_ids.append(event_id)
+    # Vérification du challenge lors de l'installation
+    if data.get("type") == "url_verification":
+        return {"challenge": data["challenge"]}
+    event = data.get("event", {})
+    # On ne traite que les mentions du bot (app_mention)
+    if event.get("type") == "app_mention" and "text" in event:
+        user_message = event["text"]
+        channel = event["channel"]
+        team_id = data.get("team_id") or event.get("team")
+        thread_ts = event.get("thread_ts")  # timestamp du thread si présent
+        # Cherche l'agent dont le slack_team_id correspond au team_id reçu
+        agent = db.query(Agent).filter(Agent.slack_team_id == team_id).first()
+        agent_id = agent.id if agent else None
+        slack_token = agent.slack_bot_token if agent else None
+        if not slack_token:
+            print(f"❌ Aucun token Slack trouvé pour l'agent avec team_id={team_id}.")
+            return {"ok": False, "error": "No Slack token for agent"}
+        # 1. Récupère l'historique du channel ou du thread
+        history = []
+        try:
+            headers = {"Authorization": f"Bearer {slack_token}"}
+            if thread_ts:
+                # Récupère les messages du thread
+                resp = requests.get(
+                    "https://slack.com/api/conversations.replies",
+                    headers=headers,
+                    params={"channel": channel, "ts": thread_ts}
+                )
+                messages = resp.json().get("messages", [])
+            else:
+                # Récupère les derniers messages du channel
+                resp = requests.get(
+                    "https://slack.com/api/conversations.history",
+                    headers=headers,
+                    params={"channel": channel, "limit": 10}
+                )
+                messages = resp.json().get("messages", [])
+            # Formate l'historique pour le modèle
+            for msg in messages:
+                role = "user" if msg.get("user") else "assistant"
+                content = msg.get("text", "")
+                history.append({"role": role, "content": content})
+        except Exception as e:
+            print(f"Erreur récupération historique Slack: {e}")
+            history = []
+        # 2. Appel direct à la fonction get_answer avec l'historique Slack
+        answer = get_answer(user_message, None, db, agent_id=agent_id, history=history)
+        # 3. Envoie la réponse sur Slack avec le bon token
+        resp = requests.post(
+            "https://slack.com/api/chat.postMessage",
+            headers={"Authorization": f"Bearer {slack_token}"},
+            json={"channel": channel, "text": answer, "thread_ts": thread_ts} if thread_ts else {"channel": channel, "text": answer}
+        )
+        print("Slack response:", resp.status_code, resp.text)
+    return {"ok": True}
+
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+
+# Endpoint pour demander la réinitialisation du mot de passe (DB version)
+from database import PasswordResetToken
+
+@app.post("/forgot-password")
+async def forgot_password(req: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == req.email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable")
+    token = str(uuid4())
+    expires_at = datetime.utcnow() + timedelta(minutes=15)
+    # Store token in DB
+    reset_token = PasswordResetToken(
+        user_id=user.id,
+        token=token,
+        expires_at=expires_at,
+        used=False
+    )
+    db.add(reset_token)
+    db.commit()
+    # Génère le lien de réinitialisation dynamiquement
+    import os
+    frontend_url = os.getenv("FRONTEND_URL", "https://taic.ai")
+    reset_link = f"{frontend_url}/reset-password?token={token}"
+    try:
+        send_reset_email(user.email, reset_link)
+        return {"message": "Un lien de réinitialisation a été envoyé par email", "token": token}
+    except Exception as e:
+        print(f"Erreur lors de l'envoi de l'email: {e}")
+        return {"message": "Erreur lors de l'envoi de l'email", "token": token}
+
+# Endpoint pour réinitialiser le mot de passe (DB version)
+@app.post("/reset-password")
+async def reset_password(req: ResetPasswordRequest, db: Session = Depends(get_db)):
+    reset_token = db.query(PasswordResetToken).filter(PasswordResetToken.token == req.token).first()
+    if not reset_token:
+        raise HTTPException(status_code=400, detail="Token invalide ou expiré")
+    if reset_token.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=400, detail="Token expiré")
+    if reset_token.used:
+        raise HTTPException(status_code=400, detail="Token déjà utilisé")
+    user = db.query(User).filter(User.id == reset_token.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable")
+    user.hashed_password = hash_password(req.new_password)
+    reset_token.used = True
+    db.commit()
+    return {"message": "Mot de passe réinitialisé avec succès"}
+# Mémoire temporaire pour les event_id déjà traités (reset à chaque redémarrage du serveur)
+
+def send_reset_email(to_email, reset_link):
+    msg = MIMEText(f"Voici votre lien de réinitialisation : {reset_link}")
+    msg['Subject'] = "Réinitialisation de votre mot de passe"
+    msg['From'] = "cohenjeremy046@gmail.com"  # Remplace par ton adresse
+    msg['To'] = to_email
+
+    # Utilise un mot de passe d'application Gmail (pas ton vrai mot de passe)
+    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+        server.login("cohenjeremy046@gmail.com", "qvoo zfco ryva hwpi")  # Remplace par ton mot de passe d'application
+        server.send_message(msg)

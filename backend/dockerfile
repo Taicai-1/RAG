@@ -14,19 +14,24 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY . .
+
+# Copy only backend code to /app/backend
+COPY . /app/backend
 
 # Create non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
+
 # Expose port
 EXPOSE 8080
+
+# Ajoute le dossier backend au PYTHONPATH pour les imports
+ENV PYTHONPATH=/app/backend
 
 # Health check (temporarily disabled for build)
 # HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
 #   CMD curl -f http://localhost:8080/health || exit 1
 
 # Command to run the application
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+CMD ["sh", "-c", "uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8080}"]

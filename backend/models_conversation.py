@@ -1,5 +1,5 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, backref
 from datetime import datetime
 from database import Base
 
@@ -10,7 +10,7 @@ class Conversation(Base):
     title = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    agent = relationship("Agent", backref="conversations")
+    agent = relationship("Agent", backref=backref("conversations", cascade="all, delete-orphan"))
     messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
 
 class Message(Base):
