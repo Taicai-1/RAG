@@ -1,3 +1,4 @@
+
 # --- Envoi d'email de réinitialisation ---
 import smtplib
 from email.mime.text import MIMEText
@@ -240,16 +241,16 @@ async def register(user: UserCreate, db: Session = Depends(get_db)):
 async def login(user: UserLogin, db: Session = Depends(get_db)):
     """Login user"""
     try:
-        db_user = db.query(User).filter(User.username == user.username).first()
+        # Permet la connexion avec username OU email
+        db_user = db.query(User).filter(
+            (User.username == user.username) | (User.email == user.username)
+        ).first()
         if not db_user or not verify_password(user.password, db_user.hashed_password):
             raise HTTPException(status_code=401, detail="Invalid credentials")
-        
         access_token = create_access_token(data={"sub": str(db_user.id)})
         logger.info(f"User logged in: {user.username}")
         event_tracker.track_user_action(db_user.id, "user_login")
-        
         return {"access_token": access_token, "token_type": "bearer"}
-    
     except HTTPException:
         raise
     except Exception as e:
@@ -281,6 +282,17 @@ async def ask_question(
             # fallback: si le frontend envoie déjà l'historique
             history = request.history
 
+        # Ajoute les 3 derniers messages de l'agent concerné pour le contexte
+        if request.agent_id:
+            last_agent_msgs = db.query(Message).filter(
+                Message.role == "agent",
+                Message.conversation_id.in_(
+                    db.query(Conversation.id).filter(Conversation.agent_id == request.agent_id)
+                )
+            ).order_by(Message.timestamp.desc()).limit(3).all()
+            for m in reversed(last_agent_msgs):
+                history.insert(0, {"role": m.role, "content": m.content})
+
         # Récupérer le modèle fine-tuné de l'agent si dispo
         model_id = None
         agent = None
@@ -290,16 +302,19 @@ async def ask_question(
             if agent and agent.finetuned_model_id:
                 model_id = agent.finetuned_model_id
 
-        # Appeler get_answer avec mémoire et model_id
-        answer = get_answer(
-            request.question,
-            int(user_id),
-            db,
-            selected_doc_ids=request.selected_documents,
-            agent_id=request.agent_id,
-            history=history,
-            model_id=model_id
-        )
+            # Ajoute la phrase avant la question finale
+            question_finale = request.question
+            prompt = f"Sachant le contexte et la discussion en cours, réponds à cette question : {question_finale}"
+            # Appeler get_answer avec mémoire et model_id
+            answer = get_answer(
+                prompt,
+                int(user_id),
+                db,
+                selected_doc_ids=request.selected_documents,
+                agent_id=request.agent_id,
+                history=history,
+                model_id=model_id
+            )
 
         response_time = time.time() - start_time
         logger.info(f"Question answered for user {user_id} in {response_time:.2f}s")
@@ -629,37 +644,25 @@ async def create_agent(
     name: str = Form(...),
     contexte: str = Form(None),
     biographie: str = Form(None),
-    email: str = Form(...),
-    password: str = Form(...),
+    statut: str = Form("public"),
     profile_photo: UploadFile = File(None),
     user_id: str = Depends(verify_token),
     db: Session = Depends(get_db)
 ):
     """Create a new agent with optional profile photo upload"""
     try:
-        logger.info(f"[CREATE_AGENT] Champs reçus: name={name}, contexte={contexte}, biographie={biographie}, email={email}, password={'***' if password else None}, profile_photo={profile_photo.filename if profile_photo else None}, user_id={user_id}")
-        # Check if email already exists for another agent
-        if db.query(Agent).filter(Agent.email == email).first():
-            logger.warning(f"[CREATE_AGENT] Email déjà utilisé: {email}")
-            raise HTTPException(status_code=400, detail="Email already registered for another agent")
-        # Hash password
-        from auth import hash_password
-        hashed_password = hash_password(password)
-
+        logger.info(f"[CREATE_AGENT] Champs reçus: name={name}, contexte={contexte}, biographie={biographie}, statut={statut}, profile_photo={profile_photo.filename if profile_photo else None}, user_id={user_id}")
         # --- GCS UPLOAD UTILS ---
         GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME", "applydi-agent-photos")
         def upload_profile_photo_to_gcs(file: UploadFile) -> str:
             """Upload a file to Google Cloud Storage and return its public URL."""
             client = storage.Client()
             bucket = client.bucket(GCS_BUCKET_NAME)
-            # Nom unique
             filename = f"{int(time.time())}_{file.filename.replace(' ', '_')}"
             blob = bucket.blob(filename)
             blob.upload_from_file(file.file, content_type=file.content_type)
-            # Ne pas appeler blob.make_public() car UBLA est activé
             return blob.public_url
 
-        # Handle profile photo upload vers GCS
         photo_url = None
         if profile_photo is not None:
             try:
@@ -674,22 +677,13 @@ async def create_agent(
             contexte=contexte,
             biographie=biographie,
             profile_photo=photo_url,
-            email=email,
-            password=hashed_password,
+            statut=statut,
             user_id=int(user_id)
         )
-        # Debug: afficher les colonnes de la table agents
-        try:
-            import sqlalchemy
-            insp = sqlalchemy.inspect(db.get_bind())
-            columns = insp.get_columns('agents')
-            logger.info(f"[CREATE_AGENT] Colonnes actuelles de la table agents: {[col['name'] for col in columns]}")
-        except Exception as debug_err:
-            logger.error(f"[CREATE_AGENT] Erreur lors de l'inspection des colonnes: {debug_err}")
         db.add(db_agent)
         db.commit()
         db.refresh(db_agent)
-        logger.info(f"[CREATE_AGENT] Agent créé avec succès: id={db_agent.id}, email={db_agent.email}")
+        logger.info(f"[CREATE_AGENT] Agent créé avec succès: id={db_agent.id}, statut={db_agent.statut}")
         return {"agent": db_agent}
     except HTTPException:
         raise
@@ -774,13 +768,12 @@ async def update_agent(
     name: str = Form(...),
     contexte: str = Form(None),
     biographie: str = Form(None),
-    email: str = Form(...),
-    password: str = Form(None),
+    statut: str = Form("public"),
     profile_photo: UploadFile = File(None),
     user_id: str = Depends(verify_token),
     db: Session = Depends(get_db)
 ):
-    """Met à jour un agent existant, y compris la photo de profil (GCS)."""
+    """Met à jour un agent existant, y compris la photo de profil (GCS) et le statut."""
     try:
         agent = db.query(Agent).filter(
             Agent.id == agent_id,
@@ -789,23 +782,13 @@ async def update_agent(
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
 
-        # Vérifier si l'email est déjà utilisé par un autre agent
-        if email != agent.email:
-            if db.query(Agent).filter(Agent.email == email).first():
-                raise HTTPException(status_code=400, detail="Email already registered for another agent")
-
         agent.name = name
         agent.contexte = contexte
         agent.biographie = biographie
-        agent.email = email
-        if password:
-            from auth import hash_password
-            agent.password = hash_password(password)
+        agent.statut = statut
 
-        # --- GCS UPLOAD UTILS ---
         GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME", "applydi-agent-photos")
         def upload_profile_photo_to_gcs(file: UploadFile) -> str:
-            """Upload a file to Google Cloud Storage and return its public URL."""
             client = storage.Client()
             bucket = client.bucket(GCS_BUCKET_NAME)
             filename = f"{int(time.time())}_{file.filename.replace(' ', '_')}"
@@ -823,7 +806,7 @@ async def update_agent(
 
         db.commit()
         db.refresh(agent)
-        logger.info(f"[UPDATE_AGENT] Agent modifié avec succès: id={agent.id}, email={agent.email}")
+        logger.info(f"[UPDATE_AGENT] Agent modifié avec succès: id={agent.id}, statut={agent.statut}")
         return {"agent": agent}
     except HTTPException:
         raise
@@ -961,14 +944,16 @@ async def slack_events(request: Request, db: Session = Depends(get_db)):
         history = []
         try:
             headers = {"Authorization": f"Bearer {slack_token}"}
+            messages = []
             if thread_ts:
-                # Récupère les messages du thread
+                # Récupère tous les messages du thread
                 resp = requests.get(
                     "https://slack.com/api/conversations.replies",
                     headers=headers,
                     params={"channel": channel, "ts": thread_ts}
                 )
                 messages = resp.json().get("messages", [])
+                logger.info(f"Slack thread history (count={len(messages)}): {[m.get('text','') for m in messages]}")
             else:
                 # Récupère les derniers messages du channel
                 resp = requests.get(
@@ -977,14 +962,17 @@ async def slack_events(request: Request, db: Session = Depends(get_db)):
                     params={"channel": channel, "limit": 10}
                 )
                 messages = resp.json().get("messages", [])
-            # Formate l'historique pour le modèle
-            for msg in messages:
+                logger.info(f"Slack channel history (count={len(messages)}): {[m.get('text','') for m in messages]}")
+            # Formate l'historique pour le modèle dans l'ordre du plus ancien au plus récent
+            for msg in sorted(messages, key=lambda m: float(m.get("ts", 0))):
                 role = "user" if msg.get("user") else "assistant"
                 content = msg.get("text", "")
                 history.append({"role": role, "content": content})
         except Exception as e:
-            print(f"Erreur récupération historique Slack: {e}")
+            logger.error(f"Erreur récupération historique Slack: {e}")
             history = []
+        # Log le contenu de l'historique avant get_answer
+        logger.info(f"Slack context sent to get_answer: {history}")
         # 2. Appel direct à la fonction get_answer avec l'historique Slack
         answer = get_answer(user_message, None, db, agent_id=agent_id, history=history)
         # 3. Envoie la réponse sur Slack avec le bon token

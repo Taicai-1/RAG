@@ -202,16 +202,36 @@ export default function AgentsPage() {
                     }}
                   />
                 </label>
+                {/* Switch agent privé/public */}
+                <div className="flex items-center mt-4">
+                  <span className="mr-2 text-sm text-gray-700">Statut :</span>
+                  <button
+                    type="button"
+                    aria-label={form.is_private ? 'Agent privé' : 'Agent public'}
+                    className={`w-14 h-7 flex items-center rounded-full px-1 transition-colors duration-200 focus:outline-none border-2 border-blue-600 ${form.is_private ? 'bg-gray-200' : 'bg-blue-600'}`}
+                    onClick={() => setForm(f => ({...f, is_private: !f.is_private}))}
+                  >
+                    <span
+                      className={`h-5 w-5 rounded-full shadow flex items-center justify-center transition-transform duration-200 ${form.is_private ? 'bg-gray-400' : 'bg-white'}`}
+                      style={{ transform: form.is_private ? 'translateX(28px)' : 'translateX(0)' }}
+                    >
+                      {form.is_private ? (
+                        <svg width="16" height="16" fill="none" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" stroke="#2563eb" strokeWidth="2" /><path d="M5 8a3 3 0 1 1 6 0" stroke="#2563eb" strokeWidth="2" /></svg>
+                      ) : (
+                        <svg width="16" height="16" fill="none" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" stroke="#2563eb" strokeWidth="2" /><path d="M8 5v6M5 8h6" stroke="#2563eb" strokeWidth="2" /></svg>
+                      )}
+                    </span>
+                  </button>
+                  <span className={`ml-2 text-sm font-semibold ${form.is_private ? 'text-gray-700' : 'text-blue-700'}`}>{form.is_private ? 'Privé' : 'Public'}</span>
+                </div>
               </div>
-              <input type="email" className="w-full px-3 py-2 border rounded-lg" placeholder="Email" value={form.email} onChange={e => setForm(f => ({...f, email: e.target.value}))} />
-              <input type="password" className="w-full px-3 py-2 border rounded-lg" placeholder="Mot de passe" value={form.password} onChange={e => setForm(f => ({...f, password: e.target.value}))} />
             </div>
             <div className="flex space-x-3 mt-6">
               <button onClick={() => setShowForm(false)} className="flex-1 px-4 py-2 text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200">Annuler</button>
               <button
                 onClick={async () => {
-                  if (!form.name.trim() || !form.email.trim() || !form.password.trim()) {
-                    toast.error("Nom, email et mot de passe obligatoires");
+                  if (!form.name.trim()) {
+                    toast.error("Le nom est obligatoire");
                     return;
                   }
                   setCreating(true);
@@ -221,8 +241,8 @@ export default function AgentsPage() {
                     formData.append("contexte", form.contexte);
                     formData.append("biographie", form.biographie);
                     if (form.profile_photo) formData.append("profile_photo", form.profile_photo);
-                    formData.append("email", form.email);
-                    formData.append("password", form.password);
+                    // Ajout du statut
+                    formData.append("statut", form.is_private ? "privé" : "public");
                     if (editingAgent) {
                       await axios.put(`${API_URL}/agents/${editingAgent.id}`, formData, {
                         headers: { Authorization: `Bearer ${token}`, "Content-Type": "multipart/form-data" }

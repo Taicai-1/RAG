@@ -99,7 +99,7 @@ export default function Login() {
         <div className="bg-white py-8 px-4 shadow sm:rounded-lg sm:px-10">
           <form className="space-y-6" onSubmit={handleSubmit}>
             <div>
-              <label htmlFor="username" className="block text-sm font-medium text-gray-700">Nom d'utilisateur</label>
+              <label htmlFor="username" className="block text-sm font-medium text-gray-700">Nom d'utilisateur ou adresse mail</label>
               <div className="mt-1">
                 <input
                   id="username"

@@ -158,6 +158,7 @@ def get_answer(
                 else:
                     user_prompt = question
                 messages.append({"role": "user", "content": user_prompt})
+                logger.info("[PROMPT OPENAI] %s", json.dumps(messages, ensure_ascii=False, indent=2))
                 response = get_chat_response(messages, model_id=model_id)
                 return response
 
@@ -199,7 +200,7 @@ def get_answer(
         else:
             user_content = f"{question}\n\nExtraits de documents :\n{enhanced_context}"
         messages.append({"role": "user", "content": user_content})
-        logger.info("PROMPT FINAL ENVOYÉ À OPENAI :\n%s", json.dumps(messages, ensure_ascii=False, indent=2))
+        logger.info("[PROMPT OPENAI] %s", json.dumps(messages, ensure_ascii=False, indent=2))
         logger.info("Getting response from OpenAI with structured messages (system, mémoire agent, last 5, user, RAG)")
         response = get_chat_response(messages, model_id=model_id)
         logger.info("Successfully got response from OpenAI")

@@ -85,8 +85,8 @@ export default function AgentChatPage() {
 
   const handleNewConversation = async (auto = false, overrideToken = null) => {
     setCreatingConv(true);
-    const convCount = conversations.length + 1;
-    const convTitle = `Conversation ${convCount}`;
+  const convCount = conversations.length + 1;
+  const convTitle = `Conversation ${convCount}`;
     try {
       const res = await axios.post(`${API_URL}/conversations`, {
         agent_id: agentId,
@@ -140,10 +140,11 @@ const handleDeleteConversation = async (convId) => {
     const userMessage = input;
     setInput("");
     try {
-      // Si la conversation n'a pas de titre, le mettre à jour avec la première question
+      // Si la conversation a le titre par défaut, le mettre à jour avec le début du premier message
       const conv = conversations.find(c => c.id === selectedConv);
-      if (conv && (!conv.title || conv.title === "")) {
-        await axios.put(`${API_URL}/conversations/${selectedConv}/title`, { title: userMessage }, {
+      if (conv && (conv.title === `Conversation ${conversations.indexOf(conv)+1}` || !conv.title || conv.title === "")) {
+        const firstMsgTitle = userMessage.length > 50 ? userMessage.slice(0, 50) + "..." : userMessage;
+        await axios.put(`${API_URL}/conversations/${selectedConv}/title`, { title: firstMsgTitle }, {
           headers: { Authorization: `Bearer ${token}` }
         });
         await loadConversations(agentId, token);

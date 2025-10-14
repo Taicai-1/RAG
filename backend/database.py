@@ -68,8 +68,9 @@ class Agent(Base):
     contexte = Column(Text, nullable=True)  # contexte pour ChatGPT
     biographie = Column(Text, nullable=True)  # biographie visible côté users
     profile_photo = Column(String(255), nullable=True)  # chemin ou URL de la photo de profil
-    email = Column(String(100), unique=True, nullable=False)  # email de connexion
-    password = Column(String(255), nullable=False)  # mot de passe hashé
+    email = Column(String(100), unique=True, nullable=True)  # email de connexion (désactivé pour création)
+    password = Column(String(255), nullable=True)  # mot de passe hashé (désactivé pour création)
+    statut = Column(String(10), nullable=False, default="public")  # 'public' ou 'privé'
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
 
     created_at = Column(DateTime, default=datetime.utcnow)
