@@ -75,7 +75,7 @@ export default function AgentsPage() {
   const [loading, setLoading] = useState(true);
   const [token, setToken] = useState("");
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ name: "", contexte: "", biographie: "", profile_photo: null, email: "", password: "" });
+  const [form, setForm] = useState({ name: "", contexte: "", biographie: "", profile_photo: null, email: "", password: "", is_private: true });
   const [creating, setCreating] = useState(false);
   const router = useRouter();
 
@@ -89,6 +89,19 @@ export default function AgentsPage() {
     }
     // eslint-disable-next-line
   }, [router]);
+
+  // Lock body scroll when modal is open
+  useEffect(() => {
+    const previous = document.body.style.overflow;
+    if (showForm) {
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = previous || '';
+    }
+    return () => {
+      document.body.style.overflow = previous || '';
+    };
+  }, [showForm]);
 
   const loadAgents = async (authToken) => {
     try {
@@ -158,14 +171,15 @@ export default function AgentsPage() {
       {/* Create New Agent Button */}
       <div className="mb-8">
         <button
-          onClick={() => setShowForm(true)}
+          onClick={() => { setEditingAgent(null); setForm({ name: "", contexte: "", biographie: "", profile_photo: null, email: "", password: "", is_private: true }); setShowForm(true); }}
           className="flex items-center px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
         >
           <Plus className="w-5 h-5 mr-2" />
           Créer un nouveau companion IA
         </button>
         {showForm && (
-          <div className="mt-6 bg-white rounded-lg shadow-lg p-6 max-w-md mx-auto">
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-lg shadow-lg p-6 max-w-md mx-auto">
             <h2 className="text-xl font-semibold mb-4">{editingAgent ? "Modifier l'agent" : "Créer un nouveau companion IA"}</h2>
             <div className="space-y-4">
               <input type="text" className="w-full px-3 py-2 border rounded-lg" placeholder="Nom" value={form.name} onChange={e => setForm(f => ({...f, name: e.target.value}))} />
@@ -255,7 +269,7 @@ export default function AgentsPage() {
                       toast.success("Agent créé avec succès !");
                     }
                     setShowForm(false);
-                    setForm({ name: "", contexte: "", biographie: "", profile_photo: null, email: "", password: "" });
+                    setForm({ name: "", contexte: "", biographie: "", profile_photo: null, email: "", password: "", is_private: true });
                     loadAgents(token);
                   } catch (err) {
                     toast.error(editingAgent ? "Erreur lors de la modification" : "Erreur lors de la création");
@@ -268,6 +282,7 @@ export default function AgentsPage() {
               >
                 {creating ? (editingAgent ? "Modification..." : "Création...") : (editingAgent ? "Modifier" : "Créer")}
               </button>
+            </div>
             </div>
           </div>
         )}
