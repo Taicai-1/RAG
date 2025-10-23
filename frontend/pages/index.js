@@ -555,6 +555,62 @@ export default function Dashboard() {
                         {new Date(doc.created_at).toLocaleDateString('fr-FR')}
                       </p>
                     </div>
+                    {/* Download Button */}
+                    {doc.gcs_url && (
+                      <button
+                        onClick={async () => {
+                          try {
+                            const token = localStorage.getItem("token");
+                            const res = await axios.get(`${API_URL}/documents/${doc.id}/download-url`, {
+                              headers: { Authorization: `Bearer ${token}` }
+                            });
+                              if (res.data.signed_url) {
+                                window.open(res.data.signed_url, "_blank");
+                              } else if (res.data.proxy_url) {
+                                // Proxy requires auth: fetch the blob with Authorization header and force download
+                                try {
+                                  const fileResp = await axios.get(`${API_URL}${res.data.proxy_url}`, {
+                                    headers: { Authorization: `Bearer ${token}` },
+                                    responseType: 'blob'
+                                  });
+
+                                  // Try to get filename from Content-Disposition header, fall back to doc.filename
+                                  let filename = doc.filename || 'download';
+                                  const disposition = fileResp.headers && (fileResp.headers['content-disposition'] || fileResp.headers['Content-Disposition']);
+                                  if (disposition) {
+                                    const m = disposition.match(/filename="?([^";]+)"?/);
+                                    if (m && m[1]) filename = m[1];
+                                  }
+
+                                  const url = window.URL.createObjectURL(new Blob([fileResp.data]));
+                                  const a = document.createElement('a');
+                                  a.href = url;
+                                  a.download = filename;
+                                  document.body.appendChild(a);
+                                  a.click();
+                                  a.remove();
+                                  window.URL.revokeObjectURL(url);
+                                } catch (downloadErr) {
+                                  console.error('Proxy download failed:', downloadErr);
+                                  toast.error('Erreur lors du téléchargement (proxy)');
+                                }
+                              } else {
+                                throw new Error('No download url returned');
+                              }
+                          } catch (err) {
+                            toast.error("Erreur lors de la génération du lien de téléchargement");
+                          }
+                        }}
+                        className={`flex-shrink-0 p-1 transition-colors ${
+                          darkMode 
+                            ? 'text-gray-500 hover:text-blue-400' 
+                            : 'text-gray-400 hover:text-blue-600'
+                        }`}
+                        title="Télécharger"
+                      >
+                        <Download className="w-4 h-4" />
+                      </button>
+                    )}
                     {/* Delete Button */}
                     <button
                       onClick={() => deleteDocument(doc.id)}

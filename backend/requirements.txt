@@ -22,3 +22,5 @@ requests
 reportlab
 pandas
 tabulate
+beautifulsoup4
+readability-lxml

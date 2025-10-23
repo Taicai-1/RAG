@@ -34,7 +34,7 @@ steps:
       - '--timeout'
       - '300'
       - '--set-env-vars'
-      - 'GOOGLE_CLOUD_PROJECT=applydi,ENVIRONMENT=production,DATABASE_URL=postgresql://applydiuser:1234@/readme_to_recover?host=/cloudsql/applydi:europe-west1:applydi-db'
+      - 'GOOGLE_CLOUD_PROJECT=applydi,ENVIRONMENT=production,DATABASE_URL=postgresql://applydiuser:1234@/readme_to_recover?host=/cloudsql/applydi:europe-west1:applydi-db, GCS_BUCKET_NAME=applydi-documents'
       - '--set-secrets'
       - 'OPENAI_API_KEY=OPENAI_API_KEY:latest'
 

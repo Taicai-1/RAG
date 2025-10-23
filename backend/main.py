@@ -1,3 +1,6 @@
+# Endpoint pour obtenir une URL signée de téléchargement GCS
+from google.cloud import storage
+
 
 # --- Envoi d'email de réinitialisation ---
 import smtplib
@@ -85,11 +88,80 @@ async def upload_url(
         # Télécharger le contenu de l'URL
         response = requests.get(request.url, timeout=15)
         response.raise_for_status()
-        content = response.text
+        html = response.text
+
+        # Extraire uniquement les informations utiles : titre, meta description et contenu principal
+        from bs4 import BeautifulSoup
+        try:
+            from readability import Document as ReadabilityDocument
+            use_readability = True
+        except Exception:
+            use_readability = False
+
+        title = ""
+        meta_desc = ""
+        main_text = ""
+
+        try:
+            soup = BeautifulSoup(html, "lxml")
+            # Title
+            if soup.title and soup.title.string:
+                title = soup.title.string.strip()
+            # Meta description
+            md = soup.find("meta", attrs={"name": "description"})
+            if md and md.get("content"):
+                meta_desc = md.get("content").strip()
+
+            # Try Readability first (better extraction of main article)
+            if use_readability:
+                try:
+                    doc = ReadabilityDocument(html)
+                    main_html = doc.summary()
+                    main_soup = BeautifulSoup(main_html, "lxml")
+                    # Get visible text
+                    main_text = "\n".join([p.get_text(separator=" ", strip=True) for p in main_soup.find_all(["p", "h1", "h2", "h3"])])
+                except Exception:
+                    use_readability = False
+
+            # Fallback: extract visible text from body, but filter out navigation/footer links
+            if not main_text:
+                body = soup.body
+                if body:
+                    # Remove scripts, styles, nav, footer, aside
+                    for tag in body.find_all(["script", "style", "nav", "footer", "aside", "header", "form", "noscript"]):
+                        tag.decompose()
+                    # Collect paragraphs and headings
+                    paragraphs = [p.get_text(separator=" ", strip=True) for p in body.find_all(["p", "h1", "h2", "h3"]) if p.get_text(strip=True)]
+                    main_text = "\n".join(paragraphs)
+
+            # Build a cleaned text that contains only useful metadata + main content (limit length)
+            cleaned = []
+            if title:
+                cleaned.append(f"Title: {title}")
+            if meta_desc:
+                cleaned.append(f"Description: {meta_desc}")
+            if main_text:
+                cleaned.append("Content:\n" + main_text)
+
+            content = "\n\n".join(cleaned)
+            if not content.strip():
+                # If nothing meaningful found, fallback to raw text (but cleaned)
+                content = soup.get_text(separator="\n", strip=True)
+
+        except Exception as e:
+            logger.warning(f"Failed to parse HTML for useful content, falling back to raw. Error: {e}")
+            content = html
+
+        # Shorten the filename
         filename = request.url.split("//")[-1][:100].replace("/", "_") + ".txt"
 
-        # Indexer le document comme pour un upload classique
-        doc_id = process_document_for_user(filename, content.encode(), int(user_id), db, agent_id=request.agent_id)
+        # Truncate content to a reasonable length to avoid huge token usage (e.g., 200k chars)
+        max_chars = 200000
+        if len(content) > max_chars:
+            content = content[:max_chars]
+
+        # Indexer le document comme pour un upload classique (send cleaned text)
+        doc_id = process_document_for_user(filename, content.encode("utf-8", errors="ignore"), int(user_id), db, agent_id=request.agent_id)
 
         logger.info(f"URL ajoutée pour user {user_id}, agent {request.agent_id}: {request.url}")
         event_tracker.track_document_upload(int(user_id), request.url, len(content))
@@ -566,12 +638,14 @@ async def get_user_documents(
         logger.info(f"Found {len(documents)} documents for user {user_id}, agent {agent_id}")
         
         result = []
+
         for doc in documents:
             try:
                 doc_data = {
                     "id": doc.id,
                     "filename": doc.filename,
-                    "created_at": doc.created_at.isoformat()
+                    "created_at": doc.created_at.isoformat(),
+                    "gcs_url": doc.gcs_url
                 }
                 # Safely try to add agent_id if it exists
                 if hasattr(doc, 'agent_id'):
@@ -579,9 +653,8 @@ async def get_user_documents(
                 result.append(doc_data)
             except Exception as doc_error:
                 logger.error(f"Error processing document {doc.id}: {doc_error}")
-                # Skip problematic documents but continue
                 continue
-                
+
         return {"documents": result}
         
     except Exception as e:
@@ -661,7 +734,14 @@ async def create_agent(
             filename = f"{int(time.time())}_{file.filename.replace(' ', '_')}"
             blob = bucket.blob(filename)
             blob.upload_from_file(file.file, content_type=file.content_type)
-            return blob.public_url
+            try:
+                # Make the object publicly readable so the browser can load it directly
+                blob.make_public()
+            except Exception:
+                logger.exception("Failed to make uploaded profile photo public; object may remain private")
+            public_url = blob.public_url
+            logger.info(f"Uploaded profile photo to GCS and set public URL: {public_url}")
+            return public_url
 
         photo_url = None
         if profile_photo is not None:
@@ -794,7 +874,13 @@ async def update_agent(
             filename = f"{int(time.time())}_{file.filename.replace(' ', '_')}"
             blob = bucket.blob(filename)
             blob.upload_from_file(file.file, content_type=file.content_type)
-            return blob.public_url
+            try:
+                blob.make_public()
+            except Exception:
+                logger.exception("Failed to make uploaded profile photo public; object may remain private")
+            public_url = blob.public_url
+            logger.info(f"Uploaded profile photo to GCS and set public URL: {public_url}")
+            return public_url
 
         if profile_photo is not None:
             try:
@@ -933,8 +1019,27 @@ async def slack_events(request: Request, db: Session = Depends(get_db)):
         channel = event["channel"]
         team_id = data.get("team_id") or event.get("team")
         thread_ts = event.get("thread_ts")  # timestamp du thread si présent
-        # Cherche l'agent dont le slack_team_id correspond au team_id reçu
-        agent = db.query(Agent).filter(Agent.slack_team_id == team_id).first()
+        # Try to parse the bot user id from the mention (format: <@U123ABC>) and prefer selecting agent by bot user id
+        import re
+        # Extract all user mentions like <@U123ABC>
+        mentions = re.findall(r"<@([A-Z0-9]+)>", user_message)
+        agent = None
+        matched_mention = None
+        # Try to find an agent whose slack_bot_user_id matches any mention
+        for mid in mentions:
+            a = db.query(Agent).filter(Agent.slack_bot_user_id == mid).first()
+            if a:
+                agent = a
+                matched_mention = mid
+                break
+
+        # Fallback: select by team id if no agent matched any mention
+        if not agent:
+            agent = db.query(Agent).filter(Agent.slack_team_id == team_id).first()
+
+        if matched_mention:
+            logger.info(f"Slack mention matched bot_user_id={matched_mention} -> agent_id={agent.id}")
+
         agent_id = agent.id if agent else None
         slack_token = agent.slack_bot_token if agent else None
         if not slack_token:
@@ -1053,3 +1158,267 @@ def send_reset_email(to_email, reset_link):
     with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
         server.login("cohenjeremy046@gmail.com", "qvoo zfco ryva hwpi")  # Remplace par ton mot de passe d'application
         server.send_message(msg)
+
+
+# ...existing code...
+
+
+# ...existing code...
+
+@app.get("/health-nltk")
+async def health_nltk():
+    """Health check for NLTK and chunking logic"""
+    from file_loader import chunk_text
+    test_text = "Hello world. This is a test.\n\nNew paragraph."
+    try:
+        chunks = chunk_text(test_text)
+        return {"status": "ok", "chunks": chunks, "n_chunks": len(chunks)}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+#test
+##### Public agents endpoints (no auth) #####
+
+# Simple in-memory rate limiter per IP for public chat (timestamps list)
+_public_chat_rate = {}
+_PUBLIC_CHAT_LIMIT = 60  # messages per hour per IP
+
+
+def _check_rate_limit(ip: str):
+    now = time.time()
+    window = 3600
+    q = _public_chat_rate.get(ip) or []
+    # keep timestamps within window
+    q = [t for t in q if now - t < window]
+    if len(q) >= _PUBLIC_CHAT_LIMIT:
+        return False
+    q.append(now)
+    _public_chat_rate[ip] = q
+    return True
+
+
+@app.get("/public/agents/{agent_id}")
+async def public_get_agent(agent_id: int, db: Session = Depends(get_db)):
+    """Return public agent profile if statut == 'public'"""
+    agent = db.query(Agent).filter(Agent.id == agent_id, Agent.statut == 'public').first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found or not public")
+    # Only expose non-sensitive fields
+    return {
+        "id": agent.id,
+        "name": agent.name,
+        "contexte": agent.contexte,
+        "biographie": agent.biographie,
+        "profile_photo": agent.profile_photo,
+        "created_at": agent.created_at.isoformat() if hasattr(agent, 'created_at') else None,
+        "slug": getattr(agent, 'slug', None),
+    }
+
+
+class PublicChatRequest(BaseModel):
+    message: str
+    history: Optional[List[dict]] = None
+
+
+@app.post("/public/agents/{agent_id}/chat")
+async def public_agent_chat(agent_id: int, req: PublicChatRequest, request: Request, db: Session = Depends(get_db)):
+    """Public chat endpoint for a public agent. Rate-limited by IP."""
+    agent = db.query(Agent).filter(Agent.id == agent_id, Agent.statut == 'public').first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found or not public")
+
+    # Rate limiting
+    ip = request.client.host if hasattr(request, 'client') and request.client else 'unknown'
+    try:
+        if not _check_rate_limit(ip):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    except Exception:
+        # fallback: allow to avoid blocking if something goes wrong
+        pass
+
+    # Build history for the model if provided
+    history = req.history or []
+    # Append the current user message as last user message in history
+    history.append({"role": "user", "content": req.message})
+
+    try:
+        answer = get_answer(req.message, None, db, agent_id=agent_id, history=history)
+    except Exception as e:
+        logger.exception(f"Error generating public chat answer for agent {agent_id}: {e}")
+        raise HTTPException(status_code=500, detail="Error generating answer")
+
+    return {"answer": answer}
+
+#test
+@app.get("/documents/{document_id}/download-url")
+async def get_signed_download_url(document_id: int, user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
+    """Retourne une URL signée pour télécharger le document depuis GCS"""
+    import logging
+    import traceback
+    from urllib.parse import urlparse
+    logger = logging.getLogger("main.download_url")
+
+    try:
+        document = db.query(Document).filter(Document.id == document_id, Document.user_id == int(user_id)).first()
+        if not document or not document.gcs_url:
+            raise HTTPException(status_code=404, detail="Document non trouvé ou pas de fichier GCS")
+
+        gcs_url = document.gcs_url
+        logger.info(f"Generating signed URL for document {document_id}, gcs_url={gcs_url}")
+
+        # Parse bucket and blob name (supports storage.googleapis.com and gs:// formats)
+        from urllib.parse import unquote
+        parsed = urlparse(gcs_url)
+        if gcs_url.startswith('gs://'):
+            parts = gcs_url[5:].split('/', 1)
+            bucket_name = parts[0]
+            blob_name = parts[1] if len(parts) > 1 else ''
+        else:
+            path = parsed.path.lstrip('/')
+            path_parts = path.split('/')
+            bucket_name = path_parts[0]
+            blob_name_encoded = '/'.join(path_parts[1:])
+            # URL-decode the blob name (handles %C3%A9, %2B, etc.)
+            blob_name = unquote(blob_name_encoded)
+
+        logger.info(f"Blob name (encoded)={locals().get('blob_name_encoded', None)}, decoded={blob_name}")
+
+        logger.info(f"Parsed bucket={bucket_name}, blob={blob_name}")
+
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+
+        # Existence check
+        try:
+            exists = blob.exists()
+        except Exception as e:
+            logger.exception("Error checking blob existence (possible permission issue)")
+            raise HTTPException(status_code=500, detail="Erreur lors de la vérification de l'existence du fichier GCS (vérifiez les permissions du service account)")
+
+        if not exists:
+            logger.error(f"Blob not found: {bucket_name}/{blob_name}")
+            raise HTTPException(status_code=404, detail="Fichier introuvable dans le bucket GCS")
+
+        try:
+            url = blob.generate_signed_url(version="v4", expiration=600, method="GET")
+        except Exception as e:
+            logger.exception("Error generating signed URL (permission or signing issue)")
+            # Provide a helpful hint without exposing sensitive info
+            detail_msg = (
+                "Impossible de générer le lien signé. Vérifiez que le service account a les droits GCS "
+                "et la capacité de signer des URL (roles/storage.objectViewer et permissions de signature). "
+                + "Détails: " + str(e)
+            )
+            # Fallback: offer a proxied download endpoint (secure, authenticated)
+            proxy_url = f"/documents/{document_id}/download"
+            logger.info(f"Falling back to proxy download for document {document_id}")
+            return {"proxy_url": proxy_url, "note": "Signed URL generation failed; using authenticated proxy download."}
+
+        logger.info(f"Signed URL generated for document {document_id}")
+        return {"signed_url": url}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger = logging.getLogger("main.download_url")
+        logger.error(f"Unexpected error generating signed URL for document {document_id}: {e}\n{tb}")
+        raise HTTPException(status_code=500, detail="Erreur interne lors de la génération du lien de téléchargement. Vérifiez les logs du backend.")
+
+
+@app.get("/documents/{document_id}/download")
+async def proxy_download_document(document_id: int, user_id: str = Depends(verify_token), db: Session = Depends(get_db)):
+    """Stream the object from GCS through the backend as an authenticated proxy.
+    This is a secure fallback when signed URL generation is not possible from the environment.
+    """
+    import mimetypes
+    document = db.query(Document).filter(Document.id == document_id, Document.user_id == int(user_id)).first()
+    if not document or not document.gcs_url:
+        raise HTTPException(status_code=404, detail="Document non trouvé ou pas de fichier GCS")
+
+    from urllib.parse import urlparse, unquote
+    gcs_url = document.gcs_url
+    parsed = urlparse(gcs_url)
+    path = parsed.path.lstrip('/')
+    path_parts = path.split('/')
+    bucket_name = path_parts[0]
+    blob_name_encoded = '/'.join(path_parts[1:])
+    blob_name = unquote(blob_name_encoded)
+    logger = logging.getLogger("main.download_url")
+    logger.info(f"Proxy download: bucket={bucket_name}, blob_encoded={blob_name_encoded}, blob_decoded={blob_name}")
+
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+
+    # Attempt to get blob and check existence
+    def get_blob(name: str):
+        return bucket.blob(name)
+
+    blob = get_blob(blob_name)
+
+    # Existence check (may raise if permission issues)
+    exists = None
+    try:
+        exists = blob.exists()
+    except Exception:
+        logger.exception(f"Error checking existence for blob {bucket_name}/{blob_name} (possible permission issue)")
+        # keep exists as None and try download below
+
+    if exists is False:
+        logger.error(f"Blob not found for proxy: {bucket_name}/{blob_name}")
+        raise HTTPException(status_code=404, detail="Fichier introuvable dans le bucket GCS")
+
+    data = None
+    # Try direct download
+    try:
+        data = blob.download_as_bytes()
+    except Exception as exc:
+        logger.exception(f"Initial download attempt failed for {bucket_name}/{blob_name}: {exc}")
+
+        # If download failed, try unicode normalization variants (NFC/NFD)
+        try:
+            import unicodedata
+            tried = []
+            for norm in ("NFC", "NFD"):
+                alt_name = unicodedata.normalize(norm, blob_name)
+                if alt_name in tried or alt_name == blob_name:
+                    continue
+                tried.append(alt_name)
+                logger.info(f"Retrying download with normalized blob name ({norm}): {alt_name}")
+                alt_blob = get_blob(alt_name)
+                try:
+                    data = alt_blob.download_as_bytes()
+                    # successful: use this blob
+                    blob = alt_blob
+                    blob_name = alt_name
+                    logger.info(f"Download succeeded with normalized name ({norm})")
+                    break
+                except Exception as exc2:
+                    logger.exception(f"Download failed with normalized name {alt_name}: {exc2}")
+        except Exception as norm_exc:
+            logger.exception(f"Error during unicode normalization retries: {norm_exc}")
+
+    if data is None:
+        # Determine if likely permission issue vs not found
+        # If exists is None, we couldn't determine existence due to permission; respond with 403 hint
+        if exists is None:
+            logger.error(f"Download failed and existence unknown for {bucket_name}/{blob_name}. Likely permission issue.")
+            raise HTTPException(status_code=403, detail="Le service n'a pas les permissions nécessaires pour lire l'objet GCS. Vérifiez roles/storage.objectViewer.")
+        else:
+            logger.error(f"All attempts to download blob failed for {bucket_name}/{blob_name}")
+            raise HTTPException(status_code=500, detail="Impossible de récupérer le fichier depuis GCS")
+
+    # Guess mimetype
+    mime, _ = mimetypes.guess_type(document.filename)
+    if not mime:
+        mime = 'application/octet-stream'
+
+    from fastapi.responses import StreamingResponse
+    from io import BytesIO
+    # Ensure filename is safe; use the stored document filename
+    safe_filename = document.filename or os.path.basename(blob_name)
+    headers = {
+        'Content-Disposition': f'attachment; filename="{safe_filename}"'
+    }
+    return StreamingResponse(BytesIO(data), media_type=mime, headers=headers)

@@ -77,6 +77,7 @@ class Agent(Base):
     finetuned_model_id = Column(String(255), nullable=True)  # ID du modèle OpenAI fine-tuné
     slack_bot_token = Column(String(255), nullable=True)  # Token du bot Slack associé à l'agent
     slack_team_id = Column(String(64), nullable=True)  # ID du workspace Slack associé à l'agent
+    slack_bot_user_id = Column(String(64), nullable=True)  # Bot user ID (ex: U123ABC) pour identifier le bot dans une team
 
     # Relations
     owner = relationship("User", back_populates="agents")
@@ -91,11 +92,11 @@ class Document(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     agent_id = Column(Integer, ForeignKey("agents.id"), nullable=True)  # Documents peuvent être liés à un agent spécifique
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+    gcs_url = Column(String(512), nullable=True)  # URL du fichier dans le bucket GCS
+
     # Relations
     owner = relationship("User", back_populates="documents")
     agent = relationship("Agent", back_populates="documents")
-    
     # Relation avec les chunks
     chunks = relationship("DocumentChunk", back_populates="document", cascade="all, delete-orphan")
 

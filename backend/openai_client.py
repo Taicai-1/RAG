@@ -53,6 +53,14 @@ client = OpenAI(
     )
 )
 
+# Allow overriding the model and the response token limit via environment variables.
+# Default back to gpt-4 (the model used previously)
+DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4")
+try:
+    DEFAULT_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "1000"))
+except Exception:
+    DEFAULT_MAX_TOKENS = 1000
+
 def get_embedding_fast(text: str) -> list:
     """Get embedding for text with fast timeout"""
     try:
@@ -96,14 +104,16 @@ def get_chat_response(messages: list, model_id: str = None) -> str:
     """Get chat response from OpenAI with robust retry logic, custom model, and structured messages"""
     import time
     max_retries = 5
-    model = model_id if model_id else "gpt-4"
+    # Prefer explicit model_id passed in, otherwise use environment/default.
+    model = model_id if model_id else DEFAULT_MODEL
+    max_tokens = DEFAULT_MAX_TOKENS
     for attempt in range(max_retries):
         try:
             logger.info(f"Attempting to get chat response (attempt {attempt + 1}/{max_retries}) with model {model}")
             response = client.chat.completions.create(
                 model=model,
                 messages=messages,
-                max_tokens=1000,
+                max_tokens=max_tokens,
                 temperature=0.7
             )
             logger.info("Successfully got response from OpenAI")

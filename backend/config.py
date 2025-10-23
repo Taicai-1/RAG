@@ -20,7 +20,9 @@ class Config:
             "openai": {
                 "api_key": os.getenv("OPENAI_API_KEY"),
                 "embedding_model": os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
-                "chat_model": os.getenv("OPENAI_CHAT_MODEL", "gpt-4")
+                # Use OPENAI_MODEL to pick the chat model; default to gpt-4
+                "chat_model": os.getenv("OPENAI_MODEL", os.getenv("OPENAI_CHAT_MODEL", "gpt-4")),
+                "chat_max_tokens": int(os.getenv("OPENAI_MAX_TOKENS", "1000"))
             },
             "jwt": {
                 "secret_key": os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production"),

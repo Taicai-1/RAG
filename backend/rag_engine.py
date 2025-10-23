@@ -120,16 +120,24 @@ def get_answer(
         last_agent_message = None
         if agent_id:
             last_agent_message = get_last_message_for_agent(agent_id, db)
-        # Get user's documents (filter by selected documents if provided)
+        # Get documents to consider for RAG
+        # If selected_doc_ids provided, use those (and respect agent_id if present)
         if selected_doc_ids:
-            user_docs = db.query(Document).filter(
-                Document.user_id == user_id,
-                Document.id.in_(selected_doc_ids)
-            ).all()
+            q = db.query(Document).filter(Document.id.in_(selected_doc_ids))
+            if agent_id:
+                q = q.filter(Document.agent_id == agent_id)
+            else:
+                q = q.filter(Document.user_id == user_id)
+            user_docs = q.all()
             logger.info(f"Using {len(user_docs)} selected documents: {selected_doc_ids}")
         else:
-            user_docs = db.query(Document).filter(Document.user_id == user_id).all()
-            logger.info(f"Using all {len(user_docs)} user documents")
+            # If we're in an agent context, prefer documents attached to that agent only
+            if agent_id:
+                user_docs = db.query(Document).filter(Document.agent_id == agent_id).all()
+                logger.info(f"Using {len(user_docs)} documents attached to agent {agent_id}")
+            else:
+                user_docs = db.query(Document).filter(Document.user_id == user_id).all()
+                logger.info(f"Using all {len(user_docs)} user documents")
 
         # Récupérer le contexte personnalisé de l'agent par son id
         agent = None
@@ -169,7 +177,7 @@ def get_answer(
 
         # Search similar chunks for this user (with optional document filtering)
         logger.info(f"Searching similar texts for user {user_id}")
-        context_results = search_similar_texts_for_user(query_embedding, user_id, db, top_k=8, selected_doc_ids=selected_doc_ids)
+        context_results = search_similar_texts_for_user(query_embedding, user_id, db, top_k=8, selected_doc_ids=selected_doc_ids, agent_id=agent_id)
 
         # Préparer le contexte RAG
         context_by_document = {}
@@ -208,13 +216,16 @@ def get_answer(
     except Exception as e:
         logger.error(f"Error getting answer: {e}")
         raise Exception(f"Erreur lors du traitement de votre question avec l'API OpenAI : {str(e)}")
-def search_similar_texts_for_user(query_embedding: List[float], user_id: int, db: Session, top_k: int = 3, selected_doc_ids: List[int] = None) -> List[dict]:
+def search_similar_texts_for_user(query_embedding: List[float], user_id: int, db: Session, top_k: int = 3, selected_doc_ids: List[int] = None, agent_id: int = None) -> List[dict]:
     """Search similar texts for a specific user - returns structured data with document info"""
     try:
         # Get all chunks for user's documents (filter by selected documents if provided)
-        query = db.query(DocumentChunk, Document).join(Document).filter(
-            Document.user_id == user_id
-        )
+        query = db.query(DocumentChunk, Document).join(Document)
+        # Respect agent_id when provided: prefer chunks from documents attached to the agent
+        if agent_id:
+            query = query.filter(Document.agent_id == agent_id)
+        else:
+            query = query.filter(Document.user_id == user_id)
         if selected_doc_ids:
             query = query.filter(Document.id.in_(selected_doc_ids))
         chunks_with_docs = query.all()
@@ -366,12 +377,26 @@ def process_document_for_user(filename: str, content: bytes, user_id: int, db: S
     try:
         logger.info(f"Starting to process document: {filename} for user {user_id}, agent {agent_id}")
         
-        # Save document to database first
+
+        # Upload file to GCS
+        from google.cloud import storage
+        import time
+        bucket_name = os.getenv("GCS_BUCKET_NAME", "applydi-documents")
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        gcs_filename = f"{int(time.time())}_{filename.replace(' ', '_')}"
+        blob = bucket.blob(gcs_filename)
+        blob.upload_from_string(content)
+        gcs_url = blob.public_url
+        logger.info(f"Document uploaded to GCS: {gcs_url}")
+
+        # Save document to database with GCS URL
         document = Document(
             filename=filename,
             content=content.decode('utf-8') if filename.endswith('.txt') else str(content),
             user_id=user_id,
-            agent_id=agent_id
+            agent_id=agent_id,
+            gcs_url=gcs_url
         )
         db.add(document)
         db.commit()
