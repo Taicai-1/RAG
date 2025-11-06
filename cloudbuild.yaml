@@ -34,9 +34,9 @@ steps:
       - '--timeout'
       - '300'
       - '--set-env-vars'
-      - 'GOOGLE_CLOUD_PROJECT=applydi,ENVIRONMENT=production,DATABASE_URL=postgresql://applydiuser:1234@/readme_to_recover?host=/cloudsql/applydi:europe-west1:applydi-db, GCS_BUCKET_NAME=applydi-documents'
+      - 'GOOGLE_CLOUD_PROJECT=applydi,ENVIRONMENT=production,DATABASE_URL=postgresql://applydiuser:1234@/readme_to_recover?host=/cloudsql/applydi:europe-west1:applydi-db,GCS_BUCKET_NAME=applydi-documents,GEMINI_MODEL=gemini:gemini-2.0-flash-001,GEMINI_DEFAULT_MODEL=gemini-2.0-flash-001,GEMINI_LOCATION=europe-west1'
       - '--set-secrets'
-      - 'OPENAI_API_KEY=OPENAI_API_KEY:latest'
+      - 'OPENAI_API_KEY=OPENAI_API_KEY:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest'
 
   # Get Backend URL
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'

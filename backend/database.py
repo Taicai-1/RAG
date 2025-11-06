@@ -71,6 +71,8 @@ class Agent(Base):
     email = Column(String(100), unique=True, nullable=True)  # email de connexion (désactivé pour création)
     password = Column(String(255), nullable=True)  # mot de passe hashé (désactivé pour création)
     statut = Column(String(10), nullable=False, default="public")  # 'public' ou 'privé'
+    # type: 'conversationnel' | 'actionnable' | 'recherche_live'
+    type = Column(String(32), nullable=False, default="conversationnel")
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
 
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -112,6 +114,22 @@ class DocumentChunk(Base):
     
     # Relation avec le document
     document = relationship("Document", back_populates="chunks")
+
+
+class AgentAction(Base):
+    __tablename__ = "agent_actions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    agent_id = Column(Integer, ForeignKey("agents.id"), nullable=True)
+    action_type = Column(String(100), nullable=False)
+    params = Column(Text, nullable=True)
+    result = Column(Text, nullable=True)
+    status = Column(String(32), nullable=False, default="pending")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User")
+    agent = relationship("Agent")
 
 # Create database engine with connection pooling
 engine = create_engine(

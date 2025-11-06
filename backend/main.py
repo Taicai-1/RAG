@@ -65,6 +65,65 @@ if os.getenv("GOOGLE_CLOUD_PROJECT"):
 app = FastAPI(title="TAIC Companion API", version="1.0.0")
 
 
+def _normalize_model_output(obj) -> str:
+    """Normalize various model response shapes to a plain text string.
+
+    This is intentionally conservative and only extracts the most common text
+    shapes returned by Vertex/Gemini so callers (and the frontend) receive a
+    plain string rather than the full provider JSON.
+    """
+    try:
+        if isinstance(obj, str):
+            return obj
+        if obj is None:
+            return ""
+        # dict-like shapes from Vertex
+        if isinstance(obj, dict):
+            # candidates -> content -> parts -> text
+            candidates = obj.get("candidates")
+            if isinstance(candidates, list) and candidates:
+                first = candidates[0]
+                if isinstance(first, dict):
+                    cont = first.get("content")
+                    if isinstance(cont, list) and cont:
+                        item = cont[0]
+                        if isinstance(item, dict) and "text" in item and isinstance(item["text"], str):
+                            return item["text"]
+                        if isinstance(item, str):
+                            return item
+                    if isinstance(cont, dict) and "text" in cont and isinstance(cont["text"], str):
+                        return cont["text"]
+                    if "text" in first and isinstance(first["text"], str):
+                        return first["text"]
+
+            # top-level content
+            if "content" in obj and isinstance(obj["content"], str):
+                return obj["content"]
+
+            # predictions/output
+            preds = obj.get("predictions") or obj.get("output")
+            if isinstance(preds, list) and preds:
+                p = preds[0]
+                if isinstance(p, str):
+                    return p
+                if isinstance(p, dict) and "content" in p and isinstance(p["content"], str):
+                    return p["content"]
+
+        # objects with .content attribute
+        if hasattr(obj, "content"):
+            c = getattr(obj, "content")
+            if isinstance(c, str):
+                return c
+
+        return str(obj)
+    except Exception:
+        try:
+            return str(obj)
+        except Exception:
+            return ""
+
+
+
 # Ajout d'un endpoint pour ajouter une URL comme source
 class UrlUploadRequest(BaseModel):
     url: str
@@ -240,6 +299,19 @@ async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "service": "TAIC Companion API"}
 
+
+@app.get("/debug/actions")
+async def debug_list_actions():
+    """Return the list of available action handlers and their docstrings.
+
+    Useful to verify that create_google_doc and create_google_sheet are registered.
+    """
+    try:
+        from actions import list_actions
+        return {"actions": list_actions()}
+    except Exception as e:
+        return {"error": str(e)}
+
 # Pydantic models
 class UserCreate(BaseModel):
     username: str
@@ -373,6 +445,20 @@ async def ask_question(
             agent = db.query(Agent).filter(Agent.id == request.agent_id).first()
             if agent and agent.finetuned_model_id:
                 model_id = agent.finetuned_model_id
+            else:
+                # Choose a default model/provider based on agent.type
+                atype = getattr(agent, 'type', 'conversationnel') if agent else 'conversationnel'
+                # Use environment variables if set, otherwise use simple provider-prefixed placeholder
+                if atype == 'conversationnel':
+                    model_id = os.getenv('OPENAI_MODEL', None)
+                elif atype == 'actionnable':
+                    # Prefer GEMINI_MODEL env var; use provider-prefixed fallback (use a real Gemini model id by default)
+                    # Default to Gemini 2.0 Flash Preview (specific publisher version) for low-latency actionnable agents
+                    model_id = os.getenv('GEMINI_MODEL', 'gemini:gemini-2.0-flash-001')
+                elif atype == 'recherche_live':
+                    model_id = os.getenv('PERPLEXITY_MODEL', 'perplexity:default')
+                else:
+                    model_id = os.getenv('OPENAI_MODEL', None)
 
             # Ajoute la phrase avant la question finale
             question_finale = request.question
@@ -391,7 +477,283 @@ async def ask_question(
         response_time = time.time() - start_time
         logger.info(f"Question answered for user {user_id} in {response_time:.2f}s")
         event_tracker.track_question_asked(int(user_id), request.question, response_time)
-        return {"answer": answer}
+        # After generating the answer, ask the model if an action should be executed (function-calling)
+        try:
+            # Lazy imports to avoid startup issues if libs missing
+            from openai_client import get_chat_response_structured, get_chat_response
+            from actions import parse_and_execute_actions
+
+            # Define function schemas matching our action handlers
+            functions = [
+                {
+                    "name": "create_google_doc",
+                    "description": "Create a Google Doc and return its URL",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "content": {"type": "string"},
+                            "folder_id": {"type": "string"}
+                        },
+                        "required": ["title"]
+                    }
+                },
+                {
+                    "name": "create_google_sheet",
+                    "description": "Create a Google Sheet and optionally populate structured sheets",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "sheets": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": {"type": "string"},
+                                        "headers": {"type": "array", "items": {"type": "string"}},
+                                        "rows": {"type": "array", "items": {"type": "array", "items": {"type": ["string","number"]}}},
+                                        "formulas": {"type": "array", "items": {"type": "object", "properties": {"range": {"type": "string"}, "formula": {"type": "string"}}}},
+                                        "conditional_formats": {
+                                            "type": "array",
+                                            "items": {"type": "object", "properties": {"range": {"type": "string"}, "type": {"type": "string"}, "value1": {"type": ["string","number"]}, "value2": {"type": ["string","number"]}, "style": {"type": "object"}}}
+                                        }
+                                    },
+                                    "required": ["title","headers"]
+                                }
+                            },
+                            "folder_id": {"type": "string"}
+                        },
+                        "required": ["title","sheets"]
+                    }
+                },
+                {
+                    "name": "echo",
+                    "description": "Echo back a message",
+                    "parameters": {"type": "object", "properties": {"text": {"type": "string"}}}
+                },
+                {
+                    "name": "write_local_file",
+                    "description": "Write a local debug file on the server",
+                    "parameters": {"type": "object", "properties": {"filename": {"type": "string"}, "content": {"type": "string"}}}
+                }
+            ]
+
+            # Build messages for the structured call: include a couple of short examples (few-shot)
+            # to guide the model to return a structured JSON matching the function schema.
+            struct_messages = []
+            # Example: guide for create_google_sheet
+            example_user_sheet = (
+                "Exemple: Crée un Google Sheet intitulé \"Tableau RH exemple\" avec une feuille 'Employés'"
+                " contenant les colonnes Nom, Département, Poste, Salaire mensuel et une ligne d'exemple: Alice, IT, Dev, 4000."
+            )
+            example_assistant_sheet = (
+                '{"title":"Tableau RH exemple","sheets":[{"title":"Employés","headers":["Nom","Département","Poste","Salaire mensuel"],'
+                '"rows":[["Alice","IT","Dev",4000]]}]}'
+            )
+            # Example: guide for create_google_doc
+            example_user_doc = (
+                "Exemple: Crée un Google Doc intitulé \"Note projet\" qui contient un court résumé et des actions à mener."
+            )
+            example_assistant_doc = (
+                '{"title":"Note projet","content":"Résumé: ...\nActions:\n- Action 1\n- Action 2"}'
+            )
+            # Add optional agent system context first
+            if agent and getattr(agent, 'contexte', None):
+                struct_messages.append({"role": "system", "content": agent.contexte})
+            # Append few-shot user/assistant pairs to demonstrate the expected JSON outputs
+            struct_messages.append({"role": "user", "content": example_user_sheet})
+            struct_messages.append({"role": "assistant", "content": example_assistant_sheet})
+            struct_messages.append({"role": "user", "content": example_user_doc})
+            struct_messages.append({"role": "assistant", "content": example_assistant_doc})
+            # Provide the assistant's answer as assistant content so the model can decide to call a function
+            # For actionnable agents (which use Gemini), normalize the assistant answer to plain text
+            if agent and getattr(agent, 'type', '') == 'actionnable':
+                try:
+                    assistant_context = _normalize_model_output(answer)
+                except Exception:
+                    assistant_context = str(answer)
+            else:
+                assistant_context = answer
+            struct_messages.append({"role": "assistant", "content": assistant_context})
+            # Finally add the real user question to trigger function-calling
+            struct_messages.append({"role": "user", "content": request.question})
+
+            # If agent is actionnable, enforce Gemini-only for function-calling / structured responses
+            struct_gemini_only = bool(agent and getattr(agent, 'type', '') == 'actionnable')
+            message = get_chat_response_structured(struct_messages, functions=functions, function_call=None, model_id=model_id, gemini_only=struct_gemini_only)
+
+            action_results = []
+            # If model requested a function call, execute it
+            if hasattr(message, 'function_call') and message.function_call:
+                fc = message.function_call
+                # Support different shapes: dict-like or SDK object with attributes
+                try:
+                    if isinstance(fc, dict):
+                        name = fc.get('name')
+                        arguments = fc.get('arguments')
+                    else:
+                        # Try common attribute names
+                        name = getattr(fc, 'name', None) or getattr(fc, 'function_name', None)
+                        arguments = getattr(fc, 'arguments', None) or getattr(fc, 'params', None)
+                    payload = {"name": name, "arguments": arguments}
+                    # Ensure the original user prompt is available to action handlers as '_raw' for parsing
+                    try:
+                        args_obj = payload.get("arguments")
+                        if isinstance(args_obj, str):
+                            try:
+                                args_parsed = json.loads(args_obj)
+                            except Exception:
+                                args_parsed = {"_raw": args_obj}
+                        elif isinstance(args_obj, dict):
+                            args_parsed = args_obj
+                        else:
+                            args_parsed = {"_raw": str(args_obj)}
+
+                        # If not already provided, attach the original user question
+                        if isinstance(args_parsed, dict) and ("_raw" not in args_parsed or not args_parsed.get("_raw")):
+                            args_parsed["_raw"] = request.question
+
+                        payload["arguments"] = args_parsed
+                    except Exception:
+                        # If anything goes wrong, keep original payload
+                        pass
+                    # If the function is create_google_sheet, validate the arguments against the schema and
+                    # attempt one corrective re-prompt if invalid (requires jsonschema and get_chat_response_json).
+                    try:
+                        if payload.get("name") == "create_google_sheet":
+                            try:
+                                # Lazy import jsonschema
+                                import jsonschema
+                                # Build the same schema as in the functions declaration for validation
+                                sheet_schema = {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": {"type": "string"},
+                                        "sheets": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "title": {"type": "string"},
+                                                    "headers": {"type": "array", "items": {"type": "string"}},
+                                                    "rows": {"type": "array", "items": {"type": "array", "items": {"type": ["string","number"]}}},
+                                                    "formulas": {"type": "array"},
+                                                    "conditional_formats": {"type": "array"}
+                                                },
+                                                "required": ["title","headers"]
+                                            }
+                                        },
+                                        "folder_id": {"type": "string"}
+                                    },
+                                    "required": ["title","sheets"]
+                                }
+                                # Validate
+                                if isinstance(payload.get("arguments"), dict):
+                                    jsonschema.validate(payload.get("arguments"), sheet_schema)
+                                else:
+                                    # If not dict, try parsing (should have been parsed earlier)
+                                    raise jsonschema.ValidationError("Arguments not an object")
+                            except Exception as ve:
+                                # Attempt one corrective re-prompt using the LLM deterministic JSON helper
+                                try:
+                                    from openai_client import get_chat_response_json
+                                    # Build prompt messages to ask for corrected JSON args
+                                    repair_msgs = [
+                                        {"role": "system", "content": "You must return ONLY a JSON object that matches the requested schema for the function arguments. No explanation."},
+                                        {"role": "user", "content": f"The user asked: {request.question}\nPlease return the function arguments JSON that matches this schema: {json.dumps(sheet_schema, ensure_ascii=False)}"}
+                                    ]
+                                    corrected = get_chat_response_json(repair_msgs, schema=sheet_schema, model_id=model_id, gemini_only=bool(agent and getattr(agent, 'type', '') == 'actionnable'))
+                                    # Replace payload arguments with corrected one if parsed
+                                    if isinstance(corrected, dict):
+                                        payload["arguments"] = corrected
+                                except Exception as e_repair:
+                                    logger.debug(f"Could not automatically repair create_google_sheet args: {e_repair}")
+                    except Exception:
+                        # Non-fatal: proceed with original payload
+                        pass
+                except Exception:
+                    payload = {"name": None, "arguments": None}
+
+                # Execute action through our actions module (if name present)
+                if payload.get("name"):
+                    result = parse_and_execute_actions(payload, db=db, agent_id=request.agent_id, user_id=int(user_id))
+                    action_results.append({"action": payload.get("name"), "result": result})
+                else:
+                    action_results.append({"status": "error", "error": "Could not parse function_call from model response"})
+
+            # If any action succeeded, ask the OpenAI model to generate a clean assistant reply
+            try:
+                confirmations = []
+                for ar in action_results:
+                    # ar is expected to be {"action": name, "result": {...}}
+                    res = ar.get("result") if isinstance(ar, dict) else None
+                    if isinstance(res, dict) and res.get("status") == "ok":
+                        payload_result = res.get("result") if isinstance(res.get("result"), dict) else None
+                        if payload_result:
+                            # common keys: url, document_id, path
+                            url = payload_result.get("url") or payload_result.get("webViewLink")
+                            if url:
+                                confirmations.append(url)
+                                continue
+                            doc_id = payload_result.get("document_id") or payload_result.get("spreadsheetId")
+                            if doc_id:
+                                confirmations.append(str(doc_id))
+                                continue
+                            path = payload_result.get("path")
+                            if path:
+                                confirmations.append(path)
+
+                if confirmations:
+                    # Build a short instruction for the model to produce a clean assistant message
+                    # Include the original assistant answer as context, but instruct the model to
+                    # produce a concise positive acknowledgement in French including the link(s).
+                    messages_for_model = []
+                    if agent and getattr(agent, 'contexte', None):
+                        messages_for_model.append({"role": "system", "content": agent.contexte})
+                    # Provide the generated assistant content as previous assistant message for context
+                    messages_for_model.append({"role": "assistant", "content": answer})
+
+                    # Provide a user instruction summarizing action results
+                    links_text = "\n".join([f"- {u}" for u in confirmations])
+                    # Include the original user prompt for context and ask the model to confirm the executed actions
+                    user_instruction = (
+                        f'Suite à ce prompt "{request.question}" les actions suivantes ont été exécutées :\n'
+                        + links_text + "\n\n"
+                        + "Génère une réponse d'assistant courte et affirmative en français confirmant que l'action a été réalisée."
+                    )
+                    messages_for_model.append({"role": "user", "content": user_instruction})
+
+                    try:
+                        crafted = get_chat_response(messages_for_model, model_id=model_id, gemini_only=bool(agent and getattr(agent, 'type', '') == 'actionnable'))
+                        # Use the crafted assistant reply as the answer
+                        answer = crafted
+                    except Exception as e_craft:
+                        # Fallback: append confirmations to original answer if model call fails
+                        logger.warning(f"Failed to craft assistant confirmation via OpenAI, falling back: {e_craft}")
+                        answer = answer + "\n\n" + "\n".join([f"Action exécutée : {u}" for u in confirmations])
+            except Exception:
+                # Non-critical: don't fail the whole request if confirmation building errors
+                pass
+
+            # Before returning, ensure we normalize the answer for actionnable agents (Gemini)
+            try:
+                if agent and getattr(agent, 'type', '') == 'actionnable':
+                    answer = _normalize_model_output(answer)
+            except Exception:
+                answer = str(answer)
+
+            # Return answer with any action results
+            return {"answer": answer, "action_results": action_results}
+        except Exception as e:
+            logger.error(f"Error while checking/executing actions: {e}")
+            # Normalize on error too for actionnable agents, then return the answer even if action step failed
+            try:
+                if agent and getattr(agent, 'type', '') == 'actionnable':
+                    answer = _normalize_model_output(answer)
+            except Exception:
+                answer = str(answer)
+            return {"answer": answer, "action_results": [{"status": "error", "error": str(e)}]}
     except Exception as e:
         logger.error(f"Error answering question for user {user_id}: {e}")
         return {"answer": f"Désolé, une erreur s'est produite lors du traitement de votre question. Détails: {str(e)}"}
@@ -520,30 +882,30 @@ async def test_openai():
     try:
         import os
         import requests
-        
+
         # Check if API key is accessible
         api_key = os.getenv("OPENAI_API_KEY")
-        
+
         # Clean the API key - remove any whitespace/newlines (CRITICAL!)
         if api_key:
             api_key = api_key.strip()
-            
+
         project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
-        
+
         response_data = {
             "api_key_found": bool(api_key),
             "api_key_length": len(api_key) if api_key else 0,
             "api_key_prefix": api_key[:10] + "..." if api_key else "None",
             "project_id": project_id,
         }
-        
+
         if not api_key:
             return {
-                "status": "error", 
+                "status": "error",
                 "message": "OPENAI_API_KEY not found in environment",
                 "debug": response_data
             }
-        
+
         # Test with direct HTTP request instead of OpenAI client
         try:
             headers = {
@@ -554,28 +916,27 @@ async def test_openai():
                 "input": "test",
                 "model": "text-embedding-3-small"
             }
-            
+
             # Test multiple endpoints
             endpoints_to_try = [
                 "https://api.openai.com/v1/embeddings",
-                "https://api.openai.com/v1/embeddings",  # Try twice for consistency
+                "https://api.openai.com/v1/embeddings",
             ]
-            
+
             for i, endpoint in enumerate(endpoints_to_try):
                 try:
-                    # Simple requests test
                     response = requests.post(
                         endpoint,
                         headers=headers,
                         json=data,
                         timeout=30,
-                        verify=True  # Ensure SSL verification
+                        verify=True
                     )
-                    
+
                     if response.status_code == 200:
                         result = response.json()
                         return {
-                            "status": "success", 
+                            "status": "success",
                             "message": f"OpenAI connection successful with requests (endpoint {i+1})",
                             "embedding_length": len(result['data'][0]['embedding']),
                             "endpoint_used": endpoint,
@@ -583,18 +944,18 @@ async def test_openai():
                         }
                     else:
                         response_data[f"attempt_{i+1}"] = f"Status {response.status_code}: {response.text[:100]}"
-                        
+
                 except Exception as e:
                     response_data[f"attempt_{i+1}_error"] = str(e)
                     continue
-            
+
             # If all direct requests failed, return detailed error
             return {
-                "status": "error", 
+                "status": "error",
                 "message": "All direct HTTP requests failed",
                 "debug": response_data
             }
-                
+
         except Exception as e:
             # Try with openai client as fallback
             from openai_client import client
@@ -602,20 +963,69 @@ async def test_openai():
                 input="test",
                 model="text-embedding-3-small"
             )
-            
+
             return {
-                "status": "success", 
+                "status": "success",
                 "message": "OpenAI connection successful with client",
                 "embedding_length": len(response.data[0].embedding),
                 "debug": response_data
             }
-        
+
     except Exception as e:
         return {
-            "status": "error", 
+            "status": "error",
             "message": str(e),
             "debug": response_data if 'response_data' in locals() else {}
         }
+
+
+@app.get("/debug/whoami")
+async def debug_whoami():
+    """Debug endpoint: returns ADC info and attempts a metadata check against configured Gemini model/location.
+
+    Use this to confirm the service account/ADC identity visible to Cloud Run and whether the configured
+    Gemini publisher model is reachable from this project/location.
+    """
+    try:
+        import google.auth
+        from google.auth.transport.requests import AuthorizedSession
+    except Exception as e:
+        return {"adc_ok": False, "error": f"google.auth import error: {e}"}
+
+    try:
+        credentials, gcp_project = google.auth.default()
+    except Exception as e:
+        return {"adc_ok": False, "error": f"google.auth.default() error: {e}"}
+
+    gemini_model = os.getenv("GEMINI_MODEL", "gemini:gemini-2.0-flash")
+    gemini_location = os.getenv("GEMINI_LOCATION", "global")
+    model_short = gemini_model.split(":", 1)[1] if ":" in gemini_model else gemini_model
+
+    try:
+        session = AuthorizedSession(credentials)
+        project_id = gcp_project or os.getenv("GOOGLE_CLOUD_PROJECT")
+        # For publisher model metadata lookups, use the literal Google publisher project
+        publisher_project = "google"
+        url = f"https://{gemini_location}-aiplatform.googleapis.com/v1/projects/{publisher_project}/locations/{gemini_location}/publishers/google/models/{model_short}"
+        resp = session.get(url, timeout=20)
+        status = resp.status_code
+        try:
+            body = resp.text
+            body_snippet = body[:1000]
+        except Exception:
+            body_snippet = "(unable to read response body)"
+    except Exception as e:
+        return {"adc_ok": True, "credentials_type": type(credentials).__name__ if 'credentials' in locals() else None, "project": project_id if 'project_id' in locals() else None, "check_error": str(e)}
+
+    return {
+        "adc_ok": True,
+        "credentials_type": type(credentials).__name__,
+        "project": project_id,
+        "gemini_model": model_short,
+        "gemini_location": gemini_location,
+        "metadata_status": status,
+        "metadata_body_snippet": body_snippet
+    }
 
 @app.get("/user/documents")
 async def get_user_documents(
@@ -711,6 +1121,39 @@ async def get_agents(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@app.get("/public/agents/{agent_id}")
+async def get_public_agent(agent_id: int, db: Session = Depends(get_db)):
+    """Return public agent data without requiring authentication.
+
+    If the agent's statut is not 'public', return 403 to avoid leaking private agents.
+    """
+    try:
+        agent = db.query(Agent).filter(Agent.id == agent_id).first()
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        # Only expose agents marked as public
+        if getattr(agent, 'statut', 'public') != 'public':
+            raise HTTPException(status_code=403, detail="Agent is private")
+
+        return {
+            "id": agent.id,
+            "name": agent.name,
+            "contexte": agent.contexte,
+            "biographie": agent.biographie,
+            "profile_photo": agent.profile_photo,
+            "email": agent.email,
+            "user_id": agent.user_id,
+            "statut": agent.statut,
+            "type": getattr(agent, 'type', 'conversationnel'),
+            "created_at": agent.created_at
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching public agent {agent_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 
 @app.post("/agents")
 async def create_agent(
@@ -718,6 +1161,7 @@ async def create_agent(
     contexte: str = Form(None),
     biographie: str = Form(None),
     statut: str = Form("public"),
+    type: str = Form("conversationnel"),
     profile_photo: UploadFile = File(None),
     user_id: str = Depends(verify_token),
     db: Session = Depends(get_db)
@@ -758,6 +1202,7 @@ async def create_agent(
             biographie=biographie,
             profile_photo=photo_url,
             statut=statut,
+            type=type,
             user_id=int(user_id)
         )
         db.add(db_agent)
@@ -849,6 +1294,7 @@ async def update_agent(
     contexte: str = Form(None),
     biographie: str = Form(None),
     statut: str = Form("public"),
+    type: str = Form("conversationnel"),
     profile_photo: UploadFile = File(None),
     user_id: str = Depends(verify_token),
     db: Session = Depends(get_db)
@@ -866,6 +1312,7 @@ async def update_agent(
         agent.contexte = contexte
         agent.biographie = biographie
         agent.statut = statut
+        agent.type = type
 
         GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME", "applydi-agent-photos")
         def upload_profile_photo_to_gcs(file: UploadFile) -> str:
@@ -894,6 +1341,11 @@ async def update_agent(
         db.refresh(agent)
         logger.info(f"[UPDATE_AGENT] Agent modifié avec succès: id={agent.id}, statut={agent.statut}")
         return {"agent": agent}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[UPDATE_AGENT] Erreur inattendue: {e}")
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la mise à jour de l'agent: {e}")
     except HTTPException:
         raise
     except Exception as e:
@@ -1080,6 +1532,12 @@ async def slack_events(request: Request, db: Session = Depends(get_db)):
         logger.info(f"Slack context sent to get_answer: {history}")
         # 2. Appel direct à la fonction get_answer avec l'historique Slack
         answer = get_answer(user_message, None, db, agent_id=agent_id, history=history)
+        # If this agent is actionnable (Gemini), normalize the model output to plain text
+        try:
+            if agent and getattr(agent, 'type', '') == 'actionnable':
+                answer = _normalize_model_output(answer)
+        except Exception:
+            answer = str(answer)
         # 3. Envoie la réponse sur Slack avec le bon token
         resp = requests.post(
             "https://slack.com/api/chat.postMessage",
@@ -1246,6 +1704,13 @@ async def public_agent_chat(agent_id: int, req: PublicChatRequest, request: Requ
     except Exception as e:
         logger.exception(f"Error generating public chat answer for agent {agent_id}: {e}")
         raise HTTPException(status_code=500, detail="Error generating answer")
+
+    # Only normalize for actionnable agents (Gemini); conversationnel agents keep current behavior
+    try:
+        if agent and getattr(agent, 'type', '') == 'actionnable':
+            answer = _normalize_model_output(answer)
+    except Exception:
+        answer = str(answer)
 
     return {"answer": answer}
 

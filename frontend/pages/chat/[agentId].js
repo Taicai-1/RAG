@@ -186,6 +186,45 @@ const handleDeleteConversation = async (convId) => {
         headers: { Authorization: `Bearer ${token}` }
       });
 
+      // Handle any action_results returned by the /ask endpoint and persist them as system messages
+      const actionResults = resAsk.data.action_results || [];
+      for (const ar of actionResults) {
+        try {
+          let content = "";
+          if (ar && ar.result) {
+            // If action executed successfully and returned a URL, show it nicely
+            if (ar.result.status === "ok" && ar.result.result) {
+              const r = ar.result.result;
+              if (r.url) {
+                content = `Action ${ar.action} exécutée: ${r.url}`;
+              } else if (r.document_id) {
+                content = `Action ${ar.action} exécutée: document id ${r.document_id}`;
+              } else if (r.path) {
+                content = `Action ${ar.action} exécutée: fichier créé ${r.path}`;
+              } else {
+                content = `Action ${ar.action} exécutée: ${JSON.stringify(r)}`;
+              }
+            } else if (ar.result.status === "error") {
+              content = `Action ${ar.action} erreur: ${ar.result.error || JSON.stringify(ar.result)}`;
+            } else {
+              content = `Action ${ar.action}: ${JSON.stringify(ar.result)}`;
+            }
+          } else {
+            content = `Action ${ar.action}: ${JSON.stringify(ar)}`;
+          }
+
+          await axios.post(`${API_URL}/conversations/${selectedConv}/messages`, {
+            conversation_id: selectedConv,
+            role: "system",
+            content: content
+          }, {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+        } catch (e) {
+          // ignore action persistence errors
+        }
+      }
+
       await selectConversation(selectedConv);
     } catch (e) {
       setLoading(false);
@@ -287,28 +326,69 @@ const handleDeleteConversation = async (convId) => {
               msg.role === "agent" &&
               idx === messages.length - 1 &&
               !msg.feedback;
+
+            // Render system action results as clickable previews when they contain a URL
+            const extractUrl = (text) => {
+              if (!text) return null;
+              const m = text.match(/https?:\/\/[^\s)\]\[]+/i);
+              return m ? m[0] : null;
+            };
+
+            const url = msg.role === "system" ? extractUrl(msg.content) : null;
+
             return (
               <div key={idx} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
                 <div className={`rounded-2xl px-4 py-3 shadow-sm max-w-[70%] whitespace-pre-line ${msg.role === "user" ? "bg-blue-600 text-white rounded-br-none" : "bg-white text-gray-900 rounded-bl-none border"}`}>
-                  {msg.content}
-                  {/* Bouton de feedback uniquement sur le dernier message agent sans feedback */}
-                  {isLastAgentMsg && (
-                    <div className="flex gap-2 mt-2">
-                      <button
-                        className="text-xl bg-gray-200 rounded-md p-1 hover:bg-gray-300 hover:text-green-600 transition-colors cursor-pointer border border-gray-300"
-                        title="Satisfait"
-                        style={{ minWidth: 32, minHeight: 32, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                        onClick={async () => {
-                          // Optimistic update: retire le bouton localement
-                          setMessages(prevMsgs => prevMsgs.map((m, i) => i === idx ? { ...m, feedback: 'like' } : m));
-                          try {
-                            await axios.patch(`${API_URL}/messages/${msg.id}/feedback`, { feedback: 'like' }, { headers: { Authorization: `Bearer ${token}` } });
-                          } catch {}
-                        }}
-                      >
-                        <span role="img" aria-label="Pouce en l'air">👍</span>
-                      </button>
+                  {msg.role === "system" && url ? (
+                    <div className="flex flex-col gap-2">
+                      <div className="text-sm text-gray-600">Résultat d'action</div>
+                      <div className="p-3 bg-gray-50 border rounded flex items-center justify-between gap-3">
+                        <div className="truncate text-blue-700">
+                          <a href={url} target="_blank" rel="noreferrer" className="underline break-words">{url}</a>
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            className="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700"
+                            onClick={() => window.open(url, "_blank")}
+                          >
+                            Ouvrir
+                          </button>
+                          <button
+                            className="px-3 py-1 bg-gray-200 text-gray-800 rounded hover:bg-gray-300"
+                            onClick={() => { navigator.clipboard?.writeText(url); }}
+                          >
+                            Copier
+                          </button>
+                        </div>
+                      </div>
+                      {msg.content && (
+                        <div className="text-xs text-gray-500 whitespace-pre-line">{msg.content.replace(url, '')}</div>
+                      )}
                     </div>
+                  ) : (
+                    // Default rendering for user/agent/system messages without URL
+                    <>
+                      {msg.content}
+                      {/* Bouton de feedback uniquement sur le dernier message agent sans feedback */}
+                      {isLastAgentMsg && (
+                        <div className="flex gap-2 mt-2">
+                          <button
+                            className="text-xl bg-gray-200 rounded-md p-1 hover:bg-gray-300 hover:text-green-600 transition-colors cursor-pointer border border-gray-300"
+                            title="Satisfait"
+                            style={{ minWidth: 32, minHeight: 32, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                            onClick={async () => {
+                              // Optimistic update: retire le bouton localement
+                              setMessages(prevMsgs => prevMsgs.map((m, i) => i === idx ? { ...m, feedback: 'like' } : m));
+                              try {
+                                await axios.patch(`${API_URL}/messages/${msg.id}/feedback`, { feedback: 'like' }, { headers: { Authorization: `Bearer ${token}` } });
+                              } catch {}
+                            }}
+                          >
+                            <span role="img" aria-label="Pouce en l'air">👍</span>
+                          </button>
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               </div>

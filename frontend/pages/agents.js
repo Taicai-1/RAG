@@ -30,29 +30,26 @@ const getApiUrl = () => {
 const API_URL = getApiUrl();
 
 const AGENT_TYPES = {
-  sales: {
-    name: "Sales",
-    icon: TrendingUp,
-    color: "bg-blue-500",
-    description: "Spécialisé dans les ventes et la prospection"
-  },
-  marketing: {
-    name: "Marketing", 
+  conversationnel: {
+    key: 'conversationnel',
+    name: 'Conversationnel',
     icon: Users,
-    color: "bg-purple-500",
-    description: "Expert en marketing et communication"
+    color: 'bg-blue-500',
+    description: 'Dialogue / chat (OpenAI par défaut)'
   },
-  hr: {
-    name: "RH",
-    icon: UserCheck,
-    color: "bg-green-500", 
-    description: "Gestion des ressources humaines"
+  actionnable: {
+    key: 'actionnable',
+    name: 'Actionnable',
+    icon: Bot,
+    color: 'bg-green-500',
+    description: 'Peut exécuter des actions (Gemini recommandé)'
   },
-  purchase: {
-    name: "Achats",
-    icon: ShoppingCart,
-    color: "bg-orange-500",
-    description: "Gestion des achats et fournisseurs"
+  recherche_live: {
+    key: 'recherche_live',
+    name: 'Recherche live',
+    icon: TrendingUp,
+    color: 'bg-purple-500',
+    description: 'Recherche web en direct (Perplexity recommandé)'
   }
 };
 
@@ -66,7 +63,9 @@ export default function AgentsPage() {
       biographie: agent.biographie || "",
       profile_photo: null, // pas de pré-remplissage du fichier
       email: agent.email || "",
-      password: "" // Toujours vide pour l'édition
+      password: "", // Toujours vide pour l'édition
+      is_private: agent.statut === 'privé',
+      type: agent.type || 'conversationnel'
     });
     setEditingAgent(agent);
     setShowForm(true);
@@ -75,7 +74,7 @@ export default function AgentsPage() {
   const [loading, setLoading] = useState(true);
   const [token, setToken] = useState("");
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ name: "", contexte: "", biographie: "", profile_photo: null, email: "", password: "", is_private: true });
+  const [form, setForm] = useState({ name: "", contexte: "", biographie: "", profile_photo: null, email: "", password: "", is_private: true, type: 'conversationnel' });
   const [creating, setCreating] = useState(false);
   const router = useRouter();
 
@@ -179,12 +178,48 @@ export default function AgentsPage() {
         </button>
         {showForm && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-            <div className="bg-white rounded-lg shadow-lg p-6 max-w-md mx-auto">
+            <div className="bg-white rounded-lg shadow-lg p-4 w-full max-w-md mx-auto max-h-[80vh] overflow-auto">
             <h2 className="text-xl font-semibold mb-4">{editingAgent ? "Modifier l'agent" : "Créer un nouveau companion IA"}</h2>
-            <div className="space-y-4">
+              <div className="space-y-3">
               <input type="text" className="w-full px-3 py-2 border rounded-lg" placeholder="Nom" value={form.name} onChange={e => setForm(f => ({...f, name: e.target.value}))} />
               <textarea className="w-full px-3 py-2 border rounded-lg" placeholder="Contexte" value={form.contexte} onChange={e => setForm(f => ({...f, contexte: e.target.value}))} />
               <textarea className="w-full px-3 py-2 border rounded-lg" placeholder="Biographie" value={form.biographie} onChange={e => setForm(f => ({...f, biographie: e.target.value}))} />
+              {/* Agent type selector - nicer cards */}
+              <div>
+                <div className="text-sm font-semibold mb-2">Type :</div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {Object.keys(AGENT_TYPES).map(key => {
+                    const t = AGENT_TYPES[key];
+                    const active = form.type === t.key;
+                    const Icon = t.icon || Users;
+                    return (
+                      <button
+                        key={t.key}
+                        type="button"
+                        onClick={() => setForm(f => ({ ...f, type: t.key }))}
+                        className={`text-left p-3 rounded-lg border transition-transform duration-150 ease-in-out focus:outline-none w-full flex flex-col items-start gap-2 ${active ? 'bg-blue-600 border-blue-600 text-white shadow-lg transform scale-100' : 'bg-white hover:shadow-md hover:-translate-y-0.5'} `}
+                      >
+                        <div className="flex items-center gap-3 w-full">
+                          <div className={`p-2 rounded-md ${active ? 'bg-white/20' : 'bg-gray-100'}`}>
+                            <Icon className={`w-6 h-6 ${active ? 'text-white' : 'text-gray-700'}`} />
+                          </div>
+                          <div className="flex-1">
+                            <div className="font-semibold">{t.name}</div>
+                            <div className={`text-xs mt-1 ${active ? 'text-white/90' : 'text-gray-500'}`}>{t.description}</div>
+                          </div>
+                          <div className="ml-2">
+                            {active ? (
+                              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                <path fillRule="evenodd" d="M16.707 5.293a1 1 0 00-1.414 0L8 12.586 4.707 9.293a1 1 0 10-1.414 1.414l4 4a1 1 0 001.414 0l8-8a1 1 0 000-1.414z" clipRule="evenodd" />
+                              </svg>
+                            ) : null}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
               <div className="flex flex-col items-center space-y-2">
                 {form.profile_photo ? (
                   <img
@@ -257,6 +292,8 @@ export default function AgentsPage() {
                     if (form.profile_photo) formData.append("profile_photo", form.profile_photo);
                     // Ajout du statut
                     formData.append("statut", form.is_private ? "privé" : "public");
+                    // Ajout du type
+                    formData.append("type", form.type || 'conversationnel');
                     if (editingAgent) {
                       await axios.put(`${API_URL}/agents/${editingAgent.id}`, formData, {
                         headers: { Authorization: `Bearer ${token}`, "Content-Type": "multipart/form-data" }

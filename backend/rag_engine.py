@@ -167,7 +167,13 @@ def get_answer(
                     user_prompt = question
                 messages.append({"role": "user", "content": user_prompt})
                 logger.info("[PROMPT OPENAI] %s", json.dumps(messages, ensure_ascii=False, indent=2))
-                response = get_chat_response(messages, model_id=model_id)
+                # If this request is for an actionnable agent, enforce Gemini-only (no OpenAI fallback)
+                gemini_only_flag = False
+                try:
+                    gemini_only_flag = bool(agent and getattr(agent, 'type', '') == 'actionnable')
+                except Exception:
+                    gemini_only_flag = False
+                response = get_chat_response(messages, model_id=model_id, gemini_only=gemini_only_flag)
                 return response
 
         # Always get question embedding with retry
@@ -210,7 +216,12 @@ def get_answer(
         messages.append({"role": "user", "content": user_content})
         logger.info("[PROMPT OPENAI] %s", json.dumps(messages, ensure_ascii=False, indent=2))
         logger.info("Getting response from OpenAI with structured messages (system, mémoire agent, last 5, user, RAG)")
-        response = get_chat_response(messages, model_id=model_id)
+        gemini_only_flag = False
+        try:
+            gemini_only_flag = bool(agent and getattr(agent, 'type', '') == 'actionnable')
+        except Exception:
+            gemini_only_flag = False
+        response = get_chat_response(messages, model_id=model_id, gemini_only=gemini_only_flag)
         logger.info("Successfully got response from OpenAI")
         return response
     except Exception as e:

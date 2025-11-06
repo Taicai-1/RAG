@@ -24,3 +24,6 @@ pandas
 tabulate
 beautifulsoup4
 readability-lxml
+google-api-python-client
+google-auth
+jsonschema
