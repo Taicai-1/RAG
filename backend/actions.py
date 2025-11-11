@@ -51,8 +51,20 @@ def _get_google_credentials(agent_id: Optional[int], db: Optional[Session] = Non
     try:
         creds_info = None
 
-        # 1) Secret Manager convention - try several common secret names (backwards compatibility)
-        if agent_id is not None:
+        # 1) Shared Secret Manager secret (global override) — prefer this for all agents.
+        #    Set DEFAULT_GOOGLE_SECRET_NAME or SHARED_GOOGLE_SECRET_NAME in the environment to configure it.
+        shared_secret = os.getenv("DEFAULT_GOOGLE_SECRET_NAME") or os.getenv("SHARED_GOOGLE_SECRET_NAME") or "agent-52-sa-key"
+        payload = _read_secret_from_secretmanager(shared_secret)
+        if payload:
+            try:
+                creds_info = json.loads(payload)
+                logger.info(f"Loaded service account JSON from shared Secret Manager '{shared_secret}' for agent {agent_id}")
+            except Exception:
+                creds_info = payload
+                logger.info(f"Loaded shared secret '{shared_secret}' for agent {agent_id} (non-JSON payload)")
+
+        # 2) If no shared secret found, fallback to per-agent secret names for backwards compatibility
+        if creds_info is None and agent_id is not None:
             candidate_names = [
                 f"agent-{agent_id}-google-sa",
                 f"agent-{agent_id}-sa-key",
@@ -87,17 +99,47 @@ def _get_google_credentials(agent_id: Optional[int], db: Optional[Session] = Non
                 from database import Agent
                 agent = db.query(Agent).filter(Agent.id == agent_id).first()
                 if agent:
-                    # Try common field names (under-specification tolerant)
-                    for field in ("google_service_account", "service_account_json", "google_sa_json"):
+                    # Try common field names (under-specification tolerant).
+                    # Also support `google_secret_name` which is expected to contain the Secret Manager secret name
+                    # that holds the service account JSON. If present, we will attempt to read that secret.
+                    for field in ("google_secret_name", "google_service_account", "service_account_json", "google_sa_json"):
                         if hasattr(agent, field) and getattr(agent, field):
                             raw = getattr(agent, field)
                             try:
-                                creds_info = json.loads(raw)
-                                logger.info(f"Loaded service account JSON from DB Agent.{field} for agent {agent_id}")
+                                # If the agent row stores a secret name reference, fetch it from Secret Manager
+                                if field == "google_secret_name" and isinstance(raw, str):
+                                    payload = _read_secret_from_secretmanager(raw)
+                                    if payload:
+                                        try:
+                                            creds_info = json.loads(payload)
+                                            logger.info(f"Loaded service account JSON from Secret Manager '{raw}' referenced in Agent.google_secret_name for agent {agent_id}")
+                                        except Exception:
+                                            creds_info = payload
+                                            logger.info(f"Loaded secret '{raw}' referenced in Agent.google_secret_name for agent {agent_id} (non-JSON payload)")
+                                        break
+                                    else:
+                                        # If the secret name didn't resolve, continue to next candidate
+                                        continue
+
+                                # Otherwise, try to interpret the DB field as JSON or raw string/json dict
+                                if isinstance(raw, dict):
+                                    creds_info = raw
+                                    logger.info(f"Loaded service account JSON dict from DB Agent.{field} for agent {agent_id}")
+                                elif isinstance(raw, str):
+                                    try:
+                                        creds_info = json.loads(raw)
+                                        logger.info(f"Loaded service account JSON from DB Agent.{field} for agent {agent_id}")
+                                    except Exception:
+                                        # Non-JSON string (could be raw key or another secret identifier)
+                                        creds_info = raw
+                                        logger.info(f"Loaded service account raw value from DB Agent.{field} for agent {agent_id}")
+                                else:
+                                    # Fallback: coerce to string
+                                    creds_info = str(raw)
+                                    logger.info(f"Loaded service account value from DB Agent.{field} for agent {agent_id}")
                                 break
-                            except Exception:
-                                creds_info = raw
-                                break
+                            except Exception as e:
+                                logger.debug(f"Error while loading credentials from Agent.{field}: {e}")
             except Exception as e:
                 logger.debug(f"Could not load agent row from DB to find credentials: {e}")
 
@@ -196,7 +238,7 @@ def action_create_google_doc(params: Dict[str, Any], db: Optional[Session] = Non
 
     # If no folder_id provided, allow a hardcoded default for agent 52 (user-provided)
     # This is a convenience fallback — consider using Secret Manager or env var for production.
-    if not folder_id and agent_id == 52:
+    if not folder_id :
         folder_id = "1cKwlhS267m42DiusQSKS6S33kvsnEX9M"
         logger.info(f"No folder_id provided — using default Shared Drive folder for agent {agent_id}: {folder_id}")
 
@@ -726,7 +768,8 @@ def parse_and_execute_actions(payload: Any, db: Optional[Session] = None, agent_
                 db.commit()
                 db.refresh(audit)
             except Exception as e:
-                logger.debug(f"Could not write initial AgentAction audit row: {e}")
+                # Surface DB write failures loudly so they are visible in logs during debugging
+                logger.exception(f"Could not write initial AgentAction audit row: {e}")
 
     except Exception:
         pass
@@ -743,7 +786,7 @@ def parse_and_execute_actions(payload: Any, db: Optional[Session] = None, agent_
             db.commit()
             db.refresh(audit)
         except Exception as e:
-            logger.debug(f"Could not update AgentAction audit row: {e}")
+            logger.exception(f"Could not update AgentAction audit row: {e}")
 
     return result
 

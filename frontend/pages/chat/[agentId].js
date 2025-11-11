@@ -22,6 +22,10 @@ export default function AgentChatPage() {
   const [selectedConv, setSelectedConv] = useState(null);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
+  const [listening, setListening] = useState(false);
+  const recognitionRef = useRef(null);
+  const [transcript, setTranscript] = useState("");
+  const [baseInput, setBaseInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [token, setToken] = useState("");
   const chatEndRef = useRef(null);
@@ -38,7 +42,74 @@ export default function AgentChatPage() {
       loadAgent(agentId, savedToken);
       loadConversations(agentId, savedToken, true); // pass flag to auto-create if none
     }
+    // Cleanup on unmount
+    return () => {
+      try {
+        if (recognitionRef.current) {
+          recognitionRef.current.onresult = null;
+          recognitionRef.current.onerror = null;
+          recognitionRef.current.stop && recognitionRef.current.stop();
+          recognitionRef.current = null;
+        }
+      } catch (e) {}
+    };
   }, [agentId]);
+
+  // Update input with transcript while listening
+  useEffect(() => {
+    if (listening) {
+      setInput(baseInput + (baseInput && transcript ? ' ' : '') + transcript);
+    }
+  }, [baseInput, transcript, listening]);
+
+  // Start speech recognition
+  const startListening = (lang = 'fr-FR') => {
+    if (typeof window === 'undefined') return;
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert('Reconnaissance vocale non supportée par ce navigateur. Utilisez Chrome ou Edge.');
+      return;
+    }
+    setBaseInput(input);
+    setTranscript('');
+    try {
+      const rec = new SpeechRecognition();
+      recognitionRef.current = rec;
+      rec.continuous = false;
+      rec.interimResults = true;
+      rec.lang = lang;
+      rec.onresult = (event) => {
+        let fullTranscript = '';
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          fullTranscript += event.results[i][0].transcript;
+        }
+        setTranscript(fullTranscript);
+      };
+      rec.onerror = (e) => {
+        console.error('Speech recognition error', e);
+        setListening(false);
+        try { rec.stop(); } catch (e) {}
+      };
+      rec.onend = () => {
+        setListening(false);
+      };
+      rec.start();
+      setListening(true);
+    } catch (e) {
+      console.error('Could not start speech recognition', e);
+      alert('Impossible de démarrer la reconnaissance vocale.');
+    }
+  };
+
+  const stopListening = () => {
+    try {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+        recognitionRef.current = null;
+      }
+    } catch (e) {}
+    setListening(false);
+  };
 
   const loadAgent = async (id, authToken) => {
     try {
@@ -267,14 +338,12 @@ const handleDeleteConversation = async (convId) => {
         >
           + Nouvelle conversation
         </button>
-        <div className="flex-1 overflow-y-auto">
-          {conversations.length === 0 && <div className="text-gray-500 text-center mt-8">Aucune conversation</div>}
-          {conversations.map(conv => (
-            <div
-              key={conv.id}
-              className={`p-3 rounded-lg mb-2 cursor-pointer flex items-center justify-between ${selectedConv === conv.id ? "bg-blue-200 font-bold" : "bg-white hover:bg-blue-100"}`}
-              onClick={e => { if (e.target === e.currentTarget) selectConversation(conv.id); }}
-            >
+        {conversations.map((conv) => (
+          <div
+            key={conv.id}
+            className="flex items-center p-3 bg-white rounded-lg shadow-sm mb-2 cursor-pointer hover:bg-gray-50"
+            onClick={e => { if (e.target === e.currentTarget) selectConversation(conv.id); }}
+          >
               <div className="flex-1 min-w-0" onClick={() => selectConversation(conv.id)}>
                 {editingTitleId === conv.id ? (
                   <input
@@ -308,7 +377,6 @@ const handleDeleteConversation = async (convId) => {
               </div>
             </div>
           ))}
-      </div>
       </div>
       {/* Colonne droite : chat */}
       <div className="flex-1 flex flex-col h-screen">
@@ -409,22 +477,43 @@ const handleDeleteConversation = async (convId) => {
         </div>
         {/* Input */}
         <div className="bg-white border-t p-4 flex items-center">
-          <input
-            type="text"
-            className="flex-1 px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent mr-3"
-            placeholder="Écrivez un message..."
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && sendMessage()}
-            disabled={loading || !selectedConv}
-          />
-          <button
-            onClick={sendMessage}
-            className="bg-blue-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-blue-700 transition-colors disabled:opacity-50"
-            disabled={loading || !input.trim() || !selectedConv}
-          >
-            Envoyer
-          </button>
+          <div className="flex items-center w-full gap-3">
+            <input
+              type="text"
+              className="flex-1 px-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              placeholder="Écrivez un message..."
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && sendMessage()}
+              disabled={loading || !selectedConv}
+            />
+            <button
+              title={listening ? "Arrêter la dictée" : "Démarrer la dictée"}
+              onClick={() => listening ? stopListening() : startListening()}
+              aria-pressed={listening}
+              className={`w-10 h-10 flex items-center justify-center rounded-full border ${listening ? 'bg-red-500 text-white ring-4 ring-red-200 animate-pulse' : 'bg-white text-gray-700 hover:bg-gray-50'} focus:outline-none`}
+            >
+              {listening ? (
+                // stop square icon
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                  <rect x="5" y="5" width="14" height="14" rx="2" />
+                </svg>
+              ) : (
+                // microphone icon
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                  <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z" />
+                  <path d="M19 11a1 1 0 0 0-2 0 5 5 0 0 1-10 0 1 1 0 0 0-2 0 7 7 0 0 0 6 6.92V21a1 1 0 0 0 2 0v-3.08A7 7 0 0 0 19 11z" />
+                </svg>
+              )}
+            </button>
+            <button
+              onClick={sendMessage}
+              className="bg-blue-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-blue-700 transition-colors disabled:opacity-50"
+              disabled={loading || !input.trim() || !selectedConv}
+            >
+              Envoyer
+            </button>
+          </div>
         </div>
       </div>
     </div>

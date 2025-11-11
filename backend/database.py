@@ -131,6 +131,21 @@ class AgentAction(Base):
     user = relationship("User")
     agent = relationship("Agent")
 
+
+class Team(Base):
+    __tablename__ = "teams"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(200), nullable=False)
+    contexte = Column(Text, nullable=True)
+    leader_agent_id = Column(Integer, nullable=False)
+    # Store action agent ids as a JSON array string
+    action_agent_ids = Column(Text, nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User")
+
 # Create database engine with connection pooling
 engine = create_engine(
     DATABASE_URL,
