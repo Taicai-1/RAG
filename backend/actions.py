@@ -239,7 +239,7 @@ def action_create_google_doc(params: Dict[str, Any], db: Optional[Session] = Non
     # If no folder_id provided, allow a hardcoded default for agent 52 (user-provided)
     # This is a convenience fallback — consider using Secret Manager or env var for production.
     if not folder_id :
-        folder_id = "1cKwlhS267m42DiusQSKS6S33kvsnEX9M"
+        folder_id = "0APAdOvpsKAuQUk9PVA"
         logger.info(f"No folder_id provided — using default Shared Drive folder for agent {agent_id}: {folder_id}")
 
     # If no content provided, ask the LLM (deterministic) to generate suitable document content from the prompt/title.
@@ -447,8 +447,8 @@ def action_create_google_sheet(params: Dict[str, Any], db: Optional[Session] = N
     folder_id = params.get("folder_id")
 
     # Default folder fallback for agent 52 if not provided
-    if not folder_id and agent_id == 52:
-        folder_id = "1cKwlhS267m42DiusQSKS6S33kvsnEX9M"
+    if not folder_id:
+        folder_id = "0APAdOvpsKAuQUk9PVA"
         logger.info(f"No folder_id provided for sheet — using default Shared Drive folder for agent {agent_id}: {folder_id}")
 
     creds = _get_google_credentials(agent_id, db)

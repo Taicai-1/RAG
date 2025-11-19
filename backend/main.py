@@ -64,6 +64,15 @@ if os.getenv("GOOGLE_CLOUD_PROJECT"):
 
 app = FastAPI(title="TAIC Companion API", version="1.0.0")
 
+# CORS configuration: autorise toutes les origines, méthodes et headers
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Ou remplace par ["https://taic.ai"] pour plus de sécurité
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 def _normalize_model_output(obj) -> str:
     """Normalize various model response shapes to a plain text string.
@@ -366,6 +375,7 @@ class QuestionRequest(BaseModel):
     question: str
     selected_documents: list[int] = []  # List of document IDs to use
     agent_id: int = None  # Id de l'agent sélectionné
+    team_id: int = None  # Id de l'équipe sélectionnée
 
 class AgentCreate(BaseModel):
     name: str
@@ -466,44 +476,27 @@ async def ask_question(
             # fallback: si le frontend envoie déjà l'historique
             history = request.history
 
-        # Ajoute les 3 derniers messages de l'agent concerné pour le contexte
-        if request.agent_id:
-            last_agent_msgs = db.query(Message).filter(
-                Message.role == "agent",
-                Message.conversation_id.in_(
-                    db.query(Conversation.id).filter(Conversation.agent_id == request.agent_id)
-                )
-            ).order_by(Message.timestamp.desc()).limit(3).all()
-            for m in reversed(last_agent_msgs):
-                history.insert(0, {"role": m.role, "content": m.content})
-
-        # Récupérer le modèle fine-tuné de l'agent si dispo
-        model_id = None
+        answer = None
         agent = None
+        model_id = None
+        # Si agent_id fourni, comportement agent classique
         if request.agent_id:
             from database import Agent
             agent = db.query(Agent).filter(Agent.id == request.agent_id).first()
             if agent and agent.finetuned_model_id:
                 model_id = agent.finetuned_model_id
             else:
-                # Choose a default model/provider based on agent.type
                 atype = getattr(agent, 'type', 'conversationnel') if agent else 'conversationnel'
-                # Use environment variables if set, otherwise use simple provider-prefixed placeholder
                 if atype == 'conversationnel':
                     model_id = os.getenv('OPENAI_MODEL', None)
                 elif atype == 'actionnable':
-                    # Prefer GEMINI_MODEL env var; use provider-prefixed fallback (use a real Gemini model id by default)
-                    # Default to Gemini 2.0 Flash Preview (specific publisher version) for low-latency actionnable agents
                     model_id = os.getenv('GEMINI_MODEL', 'gemini:gemini-2.0-flash-001')
                 elif atype == 'recherche_live':
                     model_id = os.getenv('PERPLEXITY_MODEL', 'perplexity:default')
                 else:
                     model_id = os.getenv('OPENAI_MODEL', None)
-
-            # Ajoute la phrase avant la question finale
             question_finale = request.question
             prompt = f"Sachant le contexte et la discussion en cours, réponds à cette question : {question_finale}"
-            # Appeler get_answer avec mémoire et model_id
             answer = get_answer(
                 prompt,
                 int(user_id),
@@ -513,12 +506,35 @@ async def ask_question(
                 history=history,
                 model_id=model_id
             )
+        # Si team_id fourni, on va chercher le chef d'équipe et on agit comme pour un agent
+        elif request.team_id:
+            from database import Team, Agent
+            team = db.query(Team).filter(Team.id == request.team_id).first()
+            if not team:
+                raise HTTPException(status_code=404, detail="Team not found")
+            leader = db.query(Agent).filter(Agent.id == team.leader_agent_id).first()
+            if not leader:
+                raise HTTPException(status_code=404, detail="Leader agent not found")
+            model_id = leader.finetuned_model_id or os.getenv('OPENAI_MODEL', None)
+            question_finale = request.question
+            prompt = f"(Chef d'équipe) Sachant le contexte et la discussion en cours, réponds à cette question : {question_finale}"
+            answer = get_answer(
+                prompt,
+                int(user_id),
+                db,
+                selected_doc_ids=request.selected_documents,
+                agent_id=leader.id,
+                history=history,
+                model_id=model_id
+            )
+            agent = leader
+
+        if answer is None:
+            raise HTTPException(status_code=400, detail="Aucun agent ou équipe valide fourni.")
 
         response_time = time.time() - start_time
         logger.info(f"Question answered for user {user_id} in {response_time:.2f}s")
         event_tracker.track_question_asked(int(user_id), request.question, response_time)
-        # After generating the answer, only ask the model to perform actions if this agent is 'actionnable'.
-        # Conversationnel agents keep the existing behaviour (no function-calling/execution).
         if agent and getattr(agent, 'type', '') == 'actionnable':
             try:
                 # Lazy imports to avoid startup issues if libs missing
@@ -587,9 +603,9 @@ async def ask_question(
                 struct_messages.append({
                     "role": "system",
                     "content": (
-                        "When an action must be executed, respond with ONLY a JSON object exactly in this form:"
-                        " {\"name\": \"<action_name>\", \"arguments\": {...}}. Do NOT include any explanation or extra text."
-                        " If no action is appropriate, reply with normal assistant text."
+                        "Quand une action doit être exécutée, réponds STRICTEMENT et UNIQUEMENT avec un objet JSON de la forme :\n"
+                        "{\n  \"function_call\": {\n    \"name\": \"<nom_de_l_action>\",\n    \"arguments\": { ... }\n  }\n}\n"
+                        "N’ajoute aucune explication, texte ou commentaire. Si aucune action n’est requise, réponds avec un texte normal d’assistant."
                     )
                 })
                 example_user_sheet = (
@@ -597,14 +613,30 @@ async def ask_question(
                     " contenant les colonnes Nom, Département, Poste, Salaire mensuel et une ligne d'exemple: Alice, IT, Dev, 4000."
                 )
                 example_assistant_sheet = (
-                    '{"title":"Tableau RH exemple","sheets":[{"title":"Employés","headers":["Nom","Département","Poste","Salaire mensuel"],'
-                    '"rows":[["Alice","IT","Dev",4000]]}]}'
+                    '{'
+                    '"function_call": {'
+                    '"name": "create_google_sheet",'
+                    '"arguments": {'
+                    '"title":"Tableau RH exemple",'
+                    '"sheets":[{"title":"Employés","headers":["Nom","Département","Poste","Salaire mensuel"],'
+                    '"rows":[["Alice","IT","Dev",4000]]}]'
+                    '}'
+                    '}'
+                    '}'
                 )
                 example_user_doc = (
                     "Exemple: Crée un Google Doc intitulé \"Note projet\" qui contient un court résumé et des actions à mener."
                 )
                 example_assistant_doc = (
-                    '{"title":"Note projet","content":"Résumé: ...\nActions:\n- Action 1\n- Action 2"}'
+                    '{'
+                    '"function_call": {'
+                    '"name": "create_google_doc",'
+                    '"arguments": {'
+                    '"title":"Note projet",'
+                    '"content":"Résumé: ...\\nActions:\\n- Action 1\\n- Action 2"'
+                    '}'
+                    '}'
+                    '}'
                 )
 
                 if agent and getattr(agent, 'contexte', None):
@@ -1568,8 +1600,20 @@ if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8080)
 
 class ConversationCreate(BaseModel):
-    agent_id: int
+    agent_id: Optional[int] = None
+    team_id: Optional[int] = None
     title: Optional[str] = None
+
+    @classmethod
+    def validate_one_id(cls, values):
+        if not values.get('agent_id') and not values.get('team_id'):
+            raise ValueError('agent_id ou team_id doit être fourni')
+        return values
+
+    from pydantic import root_validator
+    @root_validator(pre=True)
+    def check_ids(cls, values):
+        return cls.validate_one_id(values)
 
 class MessageCreate(BaseModel):
     conversation_id: int
@@ -1578,15 +1622,27 @@ class MessageCreate(BaseModel):
 
 @app.post("/conversations", response_model=dict)
 async def create_conversation(conv: ConversationCreate, db: Session = Depends(get_db)):
-    conversation = Conversation(agent_id=conv.agent_id, title=conv.title)
+    conversation = Conversation(agent_id=conv.agent_id, team_id=conv.team_id, title=conv.title)
     db.add(conversation)
     db.commit()
     db.refresh(conversation)
     return {"conversation_id": conversation.id}
 
+
+from fastapi import Query
+
 @app.get("/conversations", response_model=List[dict])
-async def list_conversations(agent_id: int, db: Session = Depends(get_db)):
-    conversations = db.query(Conversation).filter(Conversation.agent_id == agent_id).order_by(Conversation.created_at.desc()).all()
+async def list_conversations(
+    agent_id: int = Query(None),
+    team_id: int = Query(None),
+    db: Session = Depends(get_db)
+):
+    if agent_id is not None:
+        conversations = db.query(Conversation).filter(Conversation.agent_id == agent_id).order_by(Conversation.created_at.desc()).all()
+    elif team_id is not None:
+        conversations = db.query(Conversation).filter(Conversation.team_id == team_id).order_by(Conversation.created_at.desc()).all()
+    else:
+        raise HTTPException(status_code=422, detail="agent_id ou team_id doit être fourni")
     return [{"id": c.id, "title": c.title, "created_at": c.created_at} for c in conversations]
 
 @app.post("/conversations/{conversation_id}/messages", response_model=dict)

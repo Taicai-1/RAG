@@ -6,7 +6,8 @@ from database import Base
 class Conversation(Base):
     __tablename__ = "conversations"
     id = Column(Integer, primary_key=True, index=True)
-    agent_id = Column(Integer, ForeignKey("agents.id"), nullable=False)
+    agent_id = Column(Integer, ForeignKey("agents.id"), nullable=True)
+    team_id = Column(Integer, ForeignKey("teams.id"), nullable=True)
     title = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
