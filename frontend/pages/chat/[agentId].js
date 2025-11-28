@@ -34,6 +34,9 @@ export default function AgentChatPage() {
   const [editingTitleId, setEditingTitleId] = useState(null);
   const [editedTitle, setEditedTitle] = useState("");
   const [newConvTitle, setNewConvTitle] = useState("");
+  // Pièces jointes
+  const [attachments, setAttachments] = useState([]);
+  const [uploadingAttachments, setUploadingAttachments] = useState(false);
 
   useEffect(() => {
     const savedToken = localStorage.getItem("token");
@@ -214,19 +217,38 @@ const handleDeleteConversation = async (convId) => {
 };
 
   const sendMessage = async () => {
-    if (!input.trim() || !selectedConv) return;
+    if ((!input.trim() && attachments.length === 0) || !selectedConv) return;
     // Ajoute immédiatement le message utilisateur dans le state et le met en attente
-    const userMsg = { role: "user", content: input };
-    setMessages(prev => [...prev, userMsg]);
-    setPendingUserMessage(userMsg);
+    let userMsgContent = input;
+    let extractedText = "";
     setLoading(true);
-    const userMessage = input;
     setInput("");
+    setPendingUserMessage({ role: "user", content: input });
+    // Si pièce jointe, upload et extraction (un seul fichier)
+    if (attachments.length > 0) {
+      setUploadingAttachments(true);
+      const formData = new FormData();
+      formData.append("file", attachments[0]);
+      try {
+        const res = await axios.post(`${API_URL}/api/agent/extractText`, formData, {
+          headers: { "Content-Type": "multipart/form-data" },
+        });
+        extractedText = res.data.text || "";
+      } catch (e) {
+        extractedText = "[Erreur extraction pièce jointe]";
+      }
+      setUploadingAttachments(false);
+      setAttachments([]);
+    }
+    // Construit le prompt avec le texte extrait
+    const finalPrompt = extractedText ? `${userMsgContent}\n\n---\nContenu pièce jointe:\n${extractedText}` : userMsgContent;
+    const userMsg = { role: "user", content: finalPrompt };
+    setMessages(prev => [...prev, userMsg]);
     try {
       // Si la conversation a le titre par défaut, le mettre à jour avec le début du premier message
       const conv = conversations.find(c => c.id === selectedConv);
       if (conv && (conv.title === `Conversation ${conversations.indexOf(conv)+1}` || !conv.title || conv.title === "")) {
-        const firstMsgTitle = userMessage.length > 50 ? userMessage.slice(0, 50) + "..." : userMessage;
+        const firstMsgTitle = finalPrompt.length > 50 ? finalPrompt.slice(0, 50) + "..." : finalPrompt;
         await axios.put(`${API_URL}/conversations/${selectedConv}/title`, { title: firstMsgTitle }, {
           headers: { Authorization: `Bearer ${token}` }
         });
@@ -236,7 +258,7 @@ const handleDeleteConversation = async (convId) => {
       await axios.post(`${API_URL}/conversations/${selectedConv}/messages`, {
         conversation_id: selectedConv,
         role: "user",
-        content: userMessage
+        content: finalPrompt
       }, {
         headers: { Authorization: `Bearer ${token}` }
       });
@@ -249,7 +271,7 @@ const handleDeleteConversation = async (convId) => {
 
       // Appel à l'API /ask pour générer la réponse IA
       const resAsk = await axios.post(`${API_URL}/ask`, {
-        question: userMessage,
+        question: finalPrompt,
         agent_id: agentId,
         history: history
       }, {
@@ -275,7 +297,6 @@ const handleDeleteConversation = async (convId) => {
         try {
           let content = "";
           if (ar && ar.result) {
-            // If action executed successfully and returned a URL, show it nicely
             if (ar.result.status === "ok" && ar.result.result) {
               const r = ar.result.result;
               if (r.url) {
@@ -303,9 +324,7 @@ const handleDeleteConversation = async (convId) => {
           }, {
             headers: { Authorization: `Bearer ${token}` }
           });
-        } catch (e) {
-          // ignore action persistence errors
-        }
+        } catch (e) {}
       }
 
       await selectConversation(selectedConv);
@@ -500,6 +519,31 @@ const handleDeleteConversation = async (convId) => {
               onKeyDown={e => e.key === "Enter" && sendMessage()}
               disabled={loading || !selectedConv}
             />
+            {/* Bouton pièce jointe */}
+            <label className="w-10 h-10 flex items-center justify-center rounded-full border bg-white text-gray-700 hover:bg-gray-50 cursor-pointer" title="Ajouter une pièce jointe">
+              {/* Paperclip icon Lucide */}
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-paperclip w-5 h-5"><path d="M21.44 11.05L12.53 19.96a5 5 0 0 1-7.07-7.07l9.19-9.19a3.18 3.18 0 0 1 4.5 4.5l-9.2 9.19a1.59 1.59 0 0 1-2.25-2.25l8.49-8.49" /></svg>
+              <input
+                type="file"
+                multiple
+                style={{ display: "none" }}
+                onChange={e => {
+                  if (e.target.files) {
+                    setAttachments(Array.from(e.target.files));
+                  }
+                }}
+                accept=".pdf,.txt,.doc,.docx,.xls,.xlsx,.csv,.ppt,.pptx,.odt,.ods,.odp,.rtf,.html,.md,.json,.xml,image/*"
+                disabled={loading}
+              />
+            </label>
+            {/* Affiche les noms des fichiers sélectionnés */}
+            {attachments.length > 0 && (
+              <div className="flex flex-col gap-1 max-w-xs">
+                {attachments.map((file, idx) => (
+                  <span key={idx} className="text-xs text-gray-600 truncate">{file.name}</span>
+                ))}
+              </div>
+            )}
             <button
               title={listening ? "Arrêter la dictée" : "Démarrer la dictée"}
               onClick={() => listening ? stopListening() : startListening()}
@@ -507,12 +551,10 @@ const handleDeleteConversation = async (convId) => {
               className={`w-10 h-10 flex items-center justify-center rounded-full border ${listening ? 'bg-red-500 text-white ring-4 ring-red-200 animate-pulse' : 'bg-white text-gray-700 hover:bg-gray-50'} focus:outline-none`}
             >
               {listening ? (
-                // stop square icon
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
                   <rect x="5" y="5" width="14" height="14" rx="2" />
                 </svg>
               ) : (
-                // microphone icon
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
                   <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z" />
                   <path d="M19 11a1 1 0 0 0-2 0 5 5 0 0 1-10 0 1 1 0 0 0-2 0 7 7 0 0 0 6 6.92V21a1 1 0 0 0 2 0v-3.08A7 7 0 0 0 19 11z" />
@@ -522,9 +564,9 @@ const handleDeleteConversation = async (convId) => {
             <button
               onClick={sendMessage}
               className="bg-blue-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-blue-700 transition-colors disabled:opacity-50"
-              disabled={loading || !input.trim() || !selectedConv}
+              disabled={loading || (!input.trim() && attachments.length === 0) || !selectedConv}
             >
-              Envoyer
+              {uploadingAttachments ? "Extraction..." : "Envoyer"}
             </button>
           </div>
         </div>

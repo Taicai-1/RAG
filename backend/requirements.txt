@@ -27,3 +27,13 @@ readability-lxml
 google-api-python-client
 google-auth
 jsonschema
+python-docx
+openpyxl
+python-pptx
+google-cloud-logging
+google-cloud-core
+google-cloud-appengine-logging
+google-cloud-audit-log
+
+pytesseract
+Pillow

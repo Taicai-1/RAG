@@ -13,7 +13,7 @@ steps:
     args:
       - 'run'
       - 'deploy'
-      - 'applydi-backend'
+      - 'dev-taic-backend'
       - '--image'
       - 'gcr.io/applydi/applydi-backend'
       - '--platform'
@@ -34,7 +34,7 @@ steps:
       - '--timeout'
       - '300'
       - '--set-env-vars'
-      - 'GOOGLE_CLOUD_PROJECT=applydi,ENVIRONMENT=production,DATABASE_URL=postgresql://applydiuser:1234@/readme_to_recover?host=/cloudsql/applydi:europe-west1:applydi-db,GCS_BUCKET_NAME=applydi-documents,GEMINI_MODEL=gemini:gemini-2.0-flash-001,GEMINI_DEFAULT_MODEL=gemini-2.0-flash-001,GEMINI_LOCATION=europe-west1'
+      - 'GOOGLE_CLOUD_PROJECT=applydi,ENVIRONMENT=production,DATABASE_URL=postgresql://applydiuser:1234@/readme_to_recover?host=/cloudsql/applydi:europe-west1:applydi-db-clone,GCS_BUCKET_NAME=applydi-documents,GEMINI_MODEL=gemini:gemini-2.0-flash-001,GEMINI_DEFAULT_MODEL=gemini-2.0-flash-001,GEMINI_LOCATION=europe-west1,ALLOWED_ORIGINS=https://dev-taic-frontend-817946451913.europe-west1.run.app'
       - '--set-secrets'
       - 'OPENAI_API_KEY=OPENAI_API_KEY:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest'
 
@@ -44,7 +44,7 @@ steps:
     args:
       - '-c'
       - |
-        BACKEND_URL=$$(gcloud run services describe applydi-backend --region=europe-west1 --format="value(status.url)")
+        BACKEND_URL="https://dev-taic-backend-817946451913.europe-west1.run.app"
         echo "Backend URL: $$BACKEND_URL"
         echo "$$BACKEND_URL" > /workspace/backend_url.txt
 
@@ -68,7 +68,7 @@ steps:
       - '-c'
       - |
         BACKEND_URL=$$(cat /workspace/backend_url.txt)
-        gcloud run deploy applydi-frontend \
+        gcloud run deploy dev-taic-frontend \
           --image=gcr.io/applydi/applydi-frontend \
           --platform=managed \
           --region=europe-west1 \
@@ -78,7 +78,7 @@ steps:
           --cpu=1 \
           --min-instances=0 \
           --max-instances=5 \
-          --set-env-vars=NEXT_PUBLIC_API_URL=$$BACKEND_URL
+          --set-env-vars=NEXT_PUBLIC_API_URL=https://dev-taic-backend-817946451913.europe-west1.run.app
 
 images:
   - 'gcr.io/applydi/applydi-backend'

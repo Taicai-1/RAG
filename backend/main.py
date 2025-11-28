@@ -1,57 +1,60 @@
-# Endpoint pour obtenir une URL signée de téléchargement GCS
-from google.cloud import storage
+# Route OPTIONS générique pour toutes les routes (CORS)
+from fastapi import Response
 
 
-# --- Envoi d'email de réinitialisation ---
+
+# Standard library
+import os
+import io
+import time
+import json
+import logging
+import threading
+import shutil
 import smtplib
 from email.mime.text import MIMEText
 
 
 from uuid import uuid4
-from datetime import timedelta
-
+from datetime import datetime, timedelta
 from collections import deque
 import threading
 
+# Third-party
 import requests
-# Endpoint pour renommer une conversation
-from fastapi import Body
-
-from pydantic import BaseModel
-
-
-from models_conversation import Conversation, Message
-from pydantic import BaseModel
-from typing import List, Optional
-
-
-from pydantic import BaseModel
-
-
-from google.cloud import storage
-
-from fastapi import Body, FastAPI, UploadFile, File, Depends, HTTPException, Request
+import pdfplumber
+from docx import Document as DocxDocument
+import openpyxl
+from pptx import Presentation
+from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Request, Body, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-import requests
-import logging
-import os
-import time
-import json
-import io
-from datetime import datetime
+from typing import List, Optional
+from email.mime.text import MIMEText
+from google.cloud import storage
 
+# Local modules
 from auth import create_access_token, verify_token, hash_password, verify_password
 from database import get_db, init_db, User, Document, Agent, Team, Base, engine
 from rag_engine import get_answer, get_answer_with_files, process_document_for_user
 from file_generator import FileGenerator
 from utils import logger, event_tracker
+from models_conversation import Conversation, Message
 
-from fastapi import Form
-import shutil
+
+
+
+# Configuration du logger pour afficher les logs INFO et DEBUG
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(name)s %(message)s',
+)
+logger = logging.getLogger("app")
 
 # Setup Google Cloud Logging
 if os.getenv("GOOGLE_CLOUD_PROJECT"):
@@ -72,6 +75,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
 
 
 def _normalize_model_output(obj) -> str:
@@ -293,7 +298,7 @@ app.add_middleware(
     # Allow the deployed frontend Run.app origin(s) and localhost for development.
     # Keep the taic.ai regex permissive for any taic.ai subdomains if needed.
     allow_origins=[
-        "https://applydi-frontend-6hliasi23q-ew.a.run.app",
+        "https://dev-taic-frontend-817946451913.europe-west1.run.app",
         "http://localhost:3000",
         "http://localhost:8080"
     ],
@@ -853,33 +858,134 @@ async def ask_question(
         logger.error(f"Error answering question for user {user_id}: {e}")
         return {"answer": f"Désolé, une erreur s'est produite lors du traitement de votre question. Détails: {str(e)}"}
 
+
 @app.post("/upload")
 async def upload_file(
     file: UploadFile = File(...),
     user_id: str = Depends(verify_token),
     db: Session = Depends(get_db)
 ):
-    """Upload and process document for a specific agent"""
+    """Upload and process document for a specific agent, extracting full text from any supported file type"""
+    logger.info(f"Appel reçu sur /upload : filename={file.filename if file else 'None'}")
     try:
         # Check file size (10MB limit)
-        if file.size > 10 * 1024 * 1024:
+        if hasattr(file, 'size') and file.size > 10 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="File too large (max 10MB)")
-        
-        # Check file type
-        allowed_types = ['.pdf', '.txt', '.docx', '.ics']
-        if not any(file.filename.lower().endswith(ext) for ext in allowed_types):
-            raise HTTPException(status_code=400, detail="File type not supported")
-        
+
+        logger.info(f"Début import PJ : filename={file.filename}, content_type={file.content_type if hasattr(file, 'content_type') else 'unknown'}")
+        filename = file.filename.lower()
         content = await file.read()
-        
-        # Process document (agent_id will be None if not provided)
-        doc_id = process_document_for_user(file.filename, content, int(user_id), db, agent_id=None)
-        
+        logger.info(f"PJ reçue : filename={filename}, taille={len(content)} octets")
+        text = None
+
+        if filename.endswith('.pdf'):
+            logger.info("Tentative extraction PDF (pdfplumber)")
+            import pdfplumber
+            import tempfile
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+                tmp.write(content)
+                tmp.flush()
+                logger.info(f"Fichier PDF temporaire créé : {tmp.name}")
+                try:
+                    with pdfplumber.open(tmp.name) as pdf:
+                        text = '\n'.join([page.extract_text() or '' for page in pdf.pages])
+                    logger.info(f"Texte PDF extrait (pdfplumber) : longueur={len(text) if text else 0}, aperçu='{text[:200] if text else ''}'")
+                except Exception as e:
+                    logger.error(f"PDF extraction error: {e}")
+                # Si le texte est vide, tente l'OCR sur chaque page
+                if not text or not text.strip():
+                    logger.info("PDF vide ou non textuel, tentative OCR (pytesseract)")
+                    try:
+                        from PIL import Image
+                        import pytesseract
+                        with pdfplumber.open(tmp.name) as pdf:
+                            ocr_text = ''
+                            for i, page in enumerate(pdf.pages):
+                                img = page.to_image(resolution=300)
+                                pil_img = img.original
+                                page_ocr = pytesseract.image_to_string(pil_img, lang='fra')
+                                logger.info(f"OCR page {i+1}: longueur={len(page_ocr)}, aperçu='{page_ocr[:100]}'")
+                                ocr_text += page_ocr + '\n'
+                        text = ocr_text
+                        logger.info(f"OCR PDF extrait: longueur={len(text)}, aperçu='{text[:200]}'")
+                    except Exception as e:
+                        logger.error(f"PDF OCR extraction error: {e}")
+            os.unlink(tmp.name)
+        elif filename.endswith('.docx'):
+            logger.info("Tentative extraction DOCX")
+            from docx import Document as DocxDocument
+            import tempfile
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp:
+                tmp.write(content)
+                tmp.flush()
+                logger.info(f"Fichier DOCX temporaire créé : {tmp.name}")
+                try:
+                    doc = DocxDocument(tmp.name)
+                    text = '\n'.join([p.text for p in doc.paragraphs])
+                    logger.info(f"Texte DOCX extrait : longueur={len(text) if text else 0}, aperçu='{text[:200] if text else ''}'")
+                except Exception as e:
+                    logger.error(f"DOCX extraction error: {e}")
+            os.unlink(tmp.name)
+        elif filename.endswith('.pptx'):
+            logger.info("Tentative extraction PPTX")
+            from pptx import Presentation
+            import tempfile
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pptx') as tmp:
+                tmp.write(content)
+                tmp.flush()
+                logger.info(f"Fichier PPTX temporaire créé : {tmp.name}")
+                try:
+                    pres = Presentation(tmp.name)
+                    text = '\n'.join([shape.text for slide in pres.slides for shape in slide.shapes if hasattr(shape, "text")])
+                    logger.info(f"Texte PPTX extrait : longueur={len(text) if text else 0}, aperçu='{text[:200] if text else ''}'")
+                except Exception as e:
+                    logger.error(f"PPTX extraction error: {e}")
+            os.unlink(tmp.name)
+        elif filename.endswith('.xlsx'):
+            logger.info("Tentative extraction XLSX")
+            import openpyxl
+            import tempfile
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
+                tmp.write(content)
+                tmp.flush()
+                logger.info(f"Fichier XLSX temporaire créé : {tmp.name}")
+                try:
+                    wb = openpyxl.load_workbook(tmp.name, data_only=True)
+                    text = ''
+                    for sheet in wb.worksheets:
+                        for row in sheet.iter_rows(values_only=True):
+                            text += '\t'.join([str(cell) if cell is not None else '' for cell in row]) + '\n'
+                    logger.info(f"Texte XLSX extrait : longueur={len(text) if text else 0}, aperçu='{text[:200] if text else ''}'")
+                except Exception as e:
+                    logger.error(f"XLSX extraction error: {e}")
+            os.unlink(tmp.name)
+        elif filename.endswith('.txt') or filename.endswith('.csv') or filename.endswith('.ics'):
+            logger.info("Tentative extraction fichier texte/csv/ics")
+            try:
+                text = content.decode('utf-8', errors='ignore')
+                logger.info(f"Texte fichier texte/csv/ics extrait : longueur={len(text) if text else 0}, aperçu='{text[:200] if text else ''}'")
+            except Exception as e:
+                logger.error(f"Text file decode error: {e}")
+        else:
+            raise HTTPException(status_code=400, detail="File type not supported")
+
+
+        logger.info(f"Texte extrait de la PJ ({file.filename}): longueur={len(text) if text else 0}, aperçu='{text[:200] if text else ''}'")
+        if not text or not text.strip():
+            raise HTTPException(status_code=400, detail="Aucun texte détecté dans la pièce jointe. Vérifiez que le document contient du texte sélectionnable (pas une image ou un scan).")
+
+        # Process document with extracted text
+        doc_id = process_document_for_user(file.filename, text.encode('utf-8', errors='ignore'), int(user_id), db, agent_id=None)
+
         logger.info(f"Document uploaded for user {user_id}: {file.filename}")
-        event_tracker.track_document_upload(int(user_id), file.filename, len(content))
-        
+        event_tracker.track_document_upload(int(user_id), file.filename, len(text))
+
         return {"filename": file.filename, "document_id": doc_id, "status": "uploaded"}
-    
+
     except HTTPException:
         raise
     except Exception as e:
@@ -2152,3 +2258,77 @@ async def proxy_download_document(document_id: int, user_id: str = Depends(verif
         'Content-Disposition': f'attachment; filename="{safe_filename}"'
     }
     return StreamingResponse(BytesIO(data), media_type=mime, headers=headers)
+
+# Endpoint pour extraire le texte des fichiers uploadés (PDF, TXT, DOCX, XLSX, PPTX, etc.)
+
+# Nouvelle version : accepte un seul fichier UploadFile
+@app.post("/api/agent/extractText")
+async def extract_text_from_file(file: UploadFile = File(...)):
+    """Extrait le texte d'un fichier uploadé et renvoie le texte extrait."""
+    import logging
+    logger = logging.getLogger("extractText")
+    ext = file.filename.lower().split('.')[-1]
+    logger.info(f"Appel reçu sur /api/agent/extractText : filename={file.filename}, ext={ext}, content_type={getattr(file, 'content_type', 'unknown')}")
+    text = ""
+    try:
+        if ext == "pdf":
+            logger.info(f"Tentative extraction PDF: {file.filename}")
+            try:
+                with pdfplumber.open(file.file) as pdf:
+                    for i, page in enumerate(pdf.pages):
+                        page_text = page.extract_text()
+                        logger.info(f"Page {i+1} PDF: longueur={len(page_text) if page_text else 0}, aperçu='{page_text[:100] if page_text else ''}'")
+                        if page_text:
+                            text += page_text + "\n"
+            except Exception as e:
+                logger.error(f"Erreur extraction PDF {file.filename}: {e}")
+        elif ext in ["txt", "md", "json", "xml", "csv"]:
+            logger.info(f"Tentative extraction texte: {file.filename}")
+            try:
+                raw = await file.read()
+                text = raw.decode(errors="ignore")
+                logger.info(f"Texte extrait: longueur={len(text)}, aperçu='{text[:200]}'")
+            except Exception as e:
+                logger.error(f"Erreur extraction texte {file.filename}: {e}")
+        elif ext in ["doc", "docx"]:
+            logger.info(f"Tentative extraction DOCX: {file.filename}")
+            try:
+                doc = DocxDocument(file.file)
+                text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+                logger.info(f"Texte DOCX extrait: longueur={len(text)}, aperçu='{text[:200]}'")
+            except Exception as e:
+                logger.error(f"Erreur extraction DOCX {file.filename}: {e}")
+        elif ext in ["xls", "xlsx"]:
+            logger.info(f"Tentative extraction XLSX: {file.filename}")
+            try:
+                wb = openpyxl.load_workbook(file.file, read_only=True)
+                for sheet in wb.worksheets:
+                    for row in sheet.iter_rows(values_only=True):
+                        row_text = "\t".join([str(cell) if cell is not None else "" for cell in row])
+                        text += row_text + "\n"
+                logger.info(f"Texte XLSX extrait: longueur={len(text)}, aperçu='{text[:200]}'")
+            except Exception as e:
+                logger.error(f"Erreur extraction XLSX {file.filename}: {e}")
+        elif ext in ["ppt", "pptx"]:
+            logger.info(f"Tentative extraction PPTX: {file.filename}")
+            try:
+                pres = Presentation(file.file)
+                for slide in pres.slides:
+                    for shape in slide.shapes:
+                        if hasattr(shape, "text"):
+                            text += shape.text + "\n"
+                logger.info(f"Texte PPTX extrait: longueur={len(text)}, aperçu='{text[:200]}'")
+            except Exception as e:
+                logger.error(f"Erreur extraction PPTX {file.filename}: {e}")
+        else:
+            logger.warning(f"Type de fichier non supporté: {file.filename}")
+            text = f"[Type de fichier non supporté: {file.filename}]"
+    except Exception as e:
+        logger.error(f"Erreur extraction {file.filename}: {e}")
+        text = f"[Erreur extraction {file.filename}: {e}]"
+    logger.info(f"Résultat extraction {file.filename}: longueur={len(text.strip())}, aperçu='{text.strip()[:200]}'")
+    return {"text": text.strip()}
+
+# Log de démarrage pour Cloud Run
+print("[STARTUP] Backend main.py is starting FastAPI app...")
+
