@@ -73,7 +73,9 @@ class Agent(Base):
     statut = Column(String(10), nullable=False, default="public")  # 'public' ou 'privé'
     # type: 'conversationnel' | 'actionnable' | 'recherche_live'
     type = Column(String(32), nullable=False, default="conversationnel")
+
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    embedding = Column(Text, nullable=True)  # Embedding du contexte (JSON ou array)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     finetuned_model_id = Column(String(255), nullable=True)  # ID du modèle OpenAI fine-tuné

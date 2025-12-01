@@ -1,3 +1,8 @@
+import json
+import openai
+import numpy as np
+# Ajout de la génération d'embedding pour le contexte agent
+
 # Route OPTIONS générique pour toutes les routes (CORS)
 from fastapi import Response
 
@@ -514,24 +519,48 @@ async def ask_question(
         # Si team_id fourni, on va chercher le chef d'équipe et on agit comme pour un agent
         elif request.team_id:
             from database import Team, Agent
+            import numpy as np
             team = db.query(Team).filter(Team.id == request.team_id).first()
             if not team:
                 raise HTTPException(status_code=404, detail="Team not found")
             leader = db.query(Agent).filter(Agent.id == team.leader_agent_id).first()
             if not leader:
                 raise HTTPException(status_code=404, detail="Leader agent not found")
-            model_id = leader.finetuned_model_id or os.getenv('OPENAI_MODEL', None)
-            question_finale = request.question
-            prompt = f"(Chef d'équipe) Sachant le contexte et la discussion en cours, réponds à cette question : {question_finale}"
-            answer = get_answer(
+            # 1. Embedding du prompt
+            prompt_embedding = get_embedding(request.question)
+            # 2. Récupère les agents actionnables
+            action_ids = json.loads(team.action_agent_ids) if team.action_agent_ids else []
+            action_agents = db.query(Agent).filter(Agent.id.in_(action_ids)).all()
+            # 3. Matching sémantique
+            best_agent = None
+            best_score = -1
+            for a in action_agents:
+                if not a.embedding:
+                    continue
+                try:
+                    emb = np.array(json.loads(a.embedding))
+                    score = float(np.dot(prompt_embedding, emb) / (np.linalg.norm(prompt_embedding) * np.linalg.norm(emb)))
+                    if score > best_score:
+                        best_score = score
+                        best_agent = a
+                except Exception:
+                    continue
+            if not best_agent:
+                raise HTTPException(status_code=400, detail="Aucun agent actionnable qualifié trouvé.")
+            # 4. Appel get_answer avec l'agent actionnable
+            model_id = best_agent.finetuned_model_id or os.getenv('OPENAI_MODEL', None)
+            prompt = f"Sachant le contexte et la discussion en cours, réponds à cette question : {request.question}"
+            agent_answer = get_answer(
                 prompt,
                 int(user_id),
                 db,
                 selected_doc_ids=request.selected_documents,
-                agent_id=leader.id,
+                agent_id=best_agent.id,
                 history=history,
                 model_id=model_id
             )
+            # 5. Réponse formatée du chef d'équipe
+            answer = f"Pour répondre à votre question, j'ai fait appel à l'agent {best_agent.name}. Voici sa réponse :\n{agent_answer}"
             agent = leader
 
         if answer is None:
@@ -1059,10 +1088,9 @@ async def test_jwt():
     return {
         "jwt_secret_found": bool(os.getenv("JWT_SECRET_KEY")),
         "jwt_secret_length": len(SECRET_KEY) if SECRET_KEY else 0,
-        "jwt_secret_prefix": SECRET_KEY[:10] + "..." if SECRET_KEY else "None",
+        "jwt_secret_exposed": False,
         "environment_vars": {
-            key: "***" if "KEY" in key or "SECRET" in key or "PASSWORD" in key 
-            else value for key, value in os.environ.items() 
+            key: "***" for key, value in os.environ.items() 
             if key.startswith(("JWT", "OPENAI", "DATABASE", "GOOGLE"))
         }
     }
@@ -1409,6 +1437,9 @@ async def create_agent(
         db.add(db_agent)
         db.commit()
         db.refresh(db_agent)
+        # Génère et stocke l'embedding si le contexte n'est pas vide
+        if db_agent.contexte and db_agent.contexte.strip():
+            update_agent_embedding(db_agent, db)
         logger.info(f"[CREATE_AGENT] Agent créé avec succès: id={db_agent.id}, statut={db_agent.statut}")
         return {"agent": db_agent}
     except HTTPException:
@@ -1517,38 +1548,38 @@ async def create_team(payload: dict, user_id: str = Depends(verify_token), db: S
         name = payload.get("name")
         contexte = payload.get("contexte")
         leader_agent_id = payload.get("leader_agent_id")
-        action_agent_ids = payload.get("action_agent_ids") or []
+        member_agent_ids = payload.get("action_agent_ids") or []  # On garde le nom pour compatibilité
 
-        if not name or not leader_agent_id or not isinstance(action_agent_ids, list):
+        if not name or not leader_agent_id or not isinstance(member_agent_ids, list):
             raise HTTPException(status_code=400, detail="Missing or invalid parameters")
-        if len(action_agent_ids) != 3:
-            raise HTTPException(status_code=400, detail="Exactly 3 actionnable agents must be selected")
+        # On accepte n'importe quel nombre d'agents
 
-        # Validate agents exist and types
+        # Valider le chef (doit être conversationnel)
         leader = db.query(Agent).filter(Agent.id == int(leader_agent_id), Agent.user_id == int(user_id)).first()
         if not leader or getattr(leader, 'type', 'conversationnel') != 'conversationnel':
             raise HTTPException(status_code=400, detail="Leader agent must be a conversationnel agent belonging to you")
 
-        action_agents = []
-        for aid in action_agent_ids:
+        # Valider les membres (uniquement conversationnels)
+        member_agents = []
+        for aid in member_agent_ids:
             a = db.query(Agent).filter(Agent.id == int(aid), Agent.user_id == int(user_id)).first()
-            if not a or getattr(a, 'type', '') != 'actionnable':
-                raise HTTPException(status_code=400, detail=f"Action agent {aid} must be an actionnable agent belonging to you")
-            action_agents.append(a)
+            if not a or getattr(a, 'type', '') != 'conversationnel':
+                raise HTTPException(status_code=400, detail=f"Agent {aid} doit être un agent conversationnel appartenant à vous")
+            member_agents.append(a)
 
         import json
         team = Team(
             name=name,
             contexte=contexte,
             leader_agent_id=int(leader_agent_id),
-            action_agent_ids=json.dumps([int(x) for x in action_agent_ids]),
+            action_agent_ids=json.dumps([int(x) for x in member_agent_ids]),
             user_id=int(user_id)
         )
         db.add(team)
         db.commit()
         db.refresh(team)
 
-        # Prepare response with resolved names
+        # Préparer la réponse avec les noms
         resp = {
             "team": {
                 "id": team.id,
@@ -1556,8 +1587,8 @@ async def create_team(payload: dict, user_id: str = Depends(verify_token), db: S
                 "contexte": team.contexte,
                 "leader_agent_id": team.leader_agent_id,
                 "leader_name": leader.name,
-                "action_agent_ids": [int(x) for x in action_agent_ids],
-                "action_agent_names": [a.name for a in action_agents],
+                "member_agent_ids": [int(x) for x in member_agent_ids],
+                "member_agent_names": [a.name for a in member_agents],
                 "created_at": team.created_at.isoformat() if team.created_at else None
             }
         }
@@ -2329,6 +2360,37 @@ async def extract_text_from_file(file: UploadFile = File(...)):
     logger.info(f"Résultat extraction {file.filename}: longueur={len(text.strip())}, aperçu='{text.strip()[:200]}'")
     return {"text": text.strip()}
 
-# Log de démarrage pour Cloud Run
-print("[STARTUP] Backend main.py is starting FastAPI app...")
 
+def get_embedding(text):
+    api_key = os.getenv("OPENAI_API_KEY")
+    if api_key:
+        api_key = api_key.strip()
+    client = openai.OpenAI(api_key=api_key)
+    response = client.embeddings.create(
+        input=[text],
+        model="text-embedding-ada-002"
+    )
+    return response.data[0].embedding
+
+def update_agent_embedding(agent, db):
+    if agent.contexte:
+        agent.embedding = json.dumps(get_embedding(agent.contexte))
+        db.commit()
+
+@app.get("/debug/test-openai-embeddings")
+async def debug_test_openai_embeddings():
+    import httpx, os
+    api_key = os.getenv("OPENAI_API_KEY")
+    if api_key:
+        api_key = api_key.strip()  # Supprime espaces et retours à la ligne
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        r = httpx.post(
+            "https://api.openai.com/v1/embeddings",
+            headers=headers,
+            json={"input": ["test"], "model": "text-embedding-ada-002"},
+            timeout=10
+        )
+        return {"status": r.status_code, "body": r.text[:200]}
+    except Exception as e:
+        return {"error": str(e)}

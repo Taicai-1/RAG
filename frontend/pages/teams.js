@@ -210,9 +210,9 @@ export default function TeamsPage() {
                 </div>
                 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Agents actionnables (max 3)</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Sous-agents conversationnels</label>
                   <div className="space-y-2 max-h-32 overflow-y-auto">
-                    {agents.filter(a => a.type === 'actionnable').map(agent => (
+                    {agents.filter(a => (a.type || 'conversationnel') === 'conversationnel').map(agent => (
                       <label key={agent.id} className="flex items-center">
                         <input 
                           type="checkbox" 
@@ -220,9 +220,9 @@ export default function TeamsPage() {
                           onChange={e => {
                             const id = agent.id;
                             setForm(f => ({
-                              ...f, 
-                              actionIds: e.target.checked 
-                                ? [...f.actionIds, id].slice(0, 3) 
+                              ...f,
+                              actionIds: e.target.checked
+                                ? [...f.actionIds, id]
                                 : f.actionIds.filter(x => x !== id)
                             }));
                           }} 
@@ -244,10 +244,6 @@ export default function TeamsPage() {
                   }
                   if (!form.leaderId) {
                     toast.error("Choisir un agent conversationnel");
-                    return;
-                  }
-                  if (form.actionIds.length !== 3) {
-                    toast.error("Sélectionnez exactement 3 agents actionnables");
                     return;
                   }
                   setCreating(true);

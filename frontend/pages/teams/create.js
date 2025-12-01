@@ -46,7 +46,6 @@ export default function CreateTeamPage() {
   const toggleActionAgent = (id) => {
     setActionIds(prev => {
       if (prev.includes(id)) return prev.filter(x => x !== id);
-      if (prev.length >= 3) return prev; // limit to 3
       return [...prev, id];
     });
   };
@@ -54,7 +53,6 @@ export default function CreateTeamPage() {
   const submit = async () => {
     if (!name.trim()) { toast.error("Le nom est requis"); return; }
     if (!leaderId) { toast.error("Choisir un chef d'agent conversationnel"); return; }
-    if (actionIds.length !== 3) { toast.error("Sélectionnez exactement 3 agents actionnables"); return; }
     setCreating(true);
     try {
       const payload = { name, contexte, leader_agent_id: leaderId, action_agent_ids: actionIds };
